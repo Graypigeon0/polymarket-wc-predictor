@@ -176,3 +176,44 @@ def backfill_all() -> None:
 
 if __name__ == "__main__":
     cli()
+
+@cli.command(name="db-test")
+def db_test() -> None:
+    """Diagnostic: insert a test team into Supabase and read it back."""
+    import uuid as _uuid
+    from backend.db.client import get_client
+
+    db = get_client()
+    test_code = "ZZT"  # unlikely to collide
+
+    # Clean up any prior test row
+    try:
+        db.table("teams").delete().eq("fifa_code", test_code).execute()
+    except Exception as e:
+        typer.echo(f"Cleanup warning: {e}")
+
+    # Insert
+    team_id = str(_uuid.uuid4())
+    try:
+        r = db.table("teams").insert({
+            "id": team_id,
+            "fifa_code": test_code,
+            "name": "DB Test Team",
+            "confederation": "TEST",
+        }).execute()
+        typer.echo(f"INSERT OK -> {len(r.data)} row(s) returned")
+    except Exception as e:
+        typer.echo(f"INSERT FAILED: {type(e).__name__}: {e}", err=True)
+        return
+
+    # Read back
+    try:
+        r = db.table("teams").select("*").eq("fifa_code", test_code).execute()
+        typer.echo(f"SELECT OK -> {r.data}")
+    except Exception as e:
+        typer.echo(f"SELECT FAILED: {type(e).__name__}: {e}", err=True)
+
+    # Clean up
+    db.table("teams").delete().eq("fifa_code", test_code).execute()
+    typer.echo("Cleanup complete.")
+

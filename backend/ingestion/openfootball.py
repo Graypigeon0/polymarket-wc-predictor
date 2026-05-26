@@ -2,19 +2,35 @@
 openfootball ingestion — free historical match data from GitHub.
 
 openfootball is a crowdsourced repo of football data in clean JSON format,
-no API key, no rate limit, no paywall. We use it for historical backtest data:
-  - World Cups 2014, 2018, 2022
-  - Euros 2020/21, 2024
-  - Copa America 2024
-  - International friendlies + UNL where useful
+no API key, no rate limit, no paywall. Used for historical backtest data.
 
-Source: https://github.com/openfootball
-Raw URL pattern: https://raw.githubusercontent.com/openfootball/world-cup.json/master/<season>/worldcup.json
+Source: https://github.com/openfootball/worldcup.json
+Format (confirmed Nov 2026):
+  {
+    "name": "World Cup 2022",
+    "matches": [
+      {
+        "round": "Matchday 1" | "Round of 16" | "Final" | ...
+        "date": "2022-11-20",
+        "time": "19:00",
+        "team1": "Qatar",
+        "team2": "Ecuador",
+        "group": "Group A",          # only for group stage
+        "ground": "Al Bayt Stadium, Al Khor",
+        "goals1": [...],             # array of goal events
+        "goals2": [...],
+        "score": {...}               # may be empty if not finished
+      },
+      ...
+    ]
+  }
+
+Score is derived from len(goals1) / len(goals2).
 """
 
 from __future__ import annotations
 
-import asyncio
+import re
 import uuid
 from typing import Any
 
@@ -27,33 +43,51 @@ from backend.ingestion.football_data import _confederation, _fifa_code
 
 log = structlog.get_logger()
 
-# Map our competition codes to openfootball JSON URLs.
-# openfootball uses different repos for different competitions; we hand-pick
-# the most reliable ones below.
 SOURCES: dict[str, str] = {
-    "WC2022": "https://raw.githubusercontent.com/openfootball/worldcup.json/master/2022/worldcup.json",
-    "WC2018": "https://raw.githubusercontent.com/openfootball/worldcup.json/master/2018/worldcup.json",
-    "WC2014": "https://raw.githubusercontent.com/openfootball/worldcup.json/master/2014/worldcup.json",
+    "WC2022":   "https://raw.githubusercontent.com/openfootball/worldcup.json/master/2022/worldcup.json",
+    "WC2018":   "https://raw.githubusercontent.com/openfootball/worldcup.json/master/2018/worldcup.json",
+    "WC2014":   "https://raw.githubusercontent.com/openfootball/worldcup.json/master/2014/worldcup.json",
     "EURO2024": "https://raw.githubusercontent.com/openfootball/euro.json/master/2024/euro.json",
     "EURO2020": "https://raw.githubusercontent.com/openfootball/euro.json/master/2020/euro.json",
 }
 
-STAGE_MAP: dict[str, str] = {
-    "Group A":            "group",  "Group B":  "group",
-    "Group C":            "group",  "Group D":  "group",
-    "Group E":            "group",  "Group F":  "group",
-    "Group G":            "group",  "Group H":  "group",
-    "Round of 16":        "r16",
-    "Quarter-finals":     "qf",     "Quarterfinals":    "qf",
-    "Semi-finals":        "sf",     "Semifinals":       "sf",
-    "Third-place play-off": "3p",   "Match for third place": "3p",
-    "Final":              "final",
+# Round names → internal stage codes
+ROUND_TO_STAGE = {
+    "round of 16":            "r16",
+    "round of sixteen":       "r16",
+    "quarter-finals":         "qf",
+    "quarterfinals":          "qf",
+    "quarter finals":         "qf",
+    "semi-finals":            "sf",
+    "semifinals":             "sf",
+    "semi finals":            "sf",
+    "third-place play-off":   "3p",
+    "third place play-off":   "3p",
+    "match for third place":  "3p",
+    "third place":            "3p",
+    "final":                  "final",
 }
 
 
-# ---------------------------------------------------------------------
-# HTTP
-# ---------------------------------------------------------------------
+def _stage_from_round(round_name: str, group: str | None) -> str:
+    """Map an openfootball round/group label to our internal stage code."""
+    rn = (round_name or "").strip().lower()
+
+    # Direct knockout match
+    if rn in ROUND_TO_STAGE:
+        return ROUND_TO_STAGE[rn]
+
+    # Group stage: "Matchday N" + group field, or "Group A" round name
+    if group or rn.startswith("matchday") or rn.startswith("group"):
+        return "group"
+
+    # Knockout patterns that contain extra words
+    for key, stage in ROUND_TO_STAGE.items():
+        if key in rn:
+            return stage
+
+    return "group"  # safe default
+
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=2, max=10))
 async def _fetch_json(client: httpx.AsyncClient, url: str) -> dict[str, Any]:
@@ -62,16 +96,15 @@ async def _fetch_json(client: httpx.AsyncClient, url: str) -> dict[str, Any]:
     return r.json()
 
 
-# ---------------------------------------------------------------------
-# Team helpers (reuse football_data lookups for consistency)
-# ---------------------------------------------------------------------
-
 async def _upsert_team(country: str) -> str:
+    """Get or create a team by country name. Returns the team UUID."""
     db = get_client()
     code = _fifa_code(country)
+
     existing = db.table("teams").select("id").eq("fifa_code", code).execute()
     if existing.data:
         return existing.data[0]["id"]
+
     team_id = str(uuid.uuid4())
     db.table("teams").insert({
         "id": team_id,
@@ -82,87 +115,80 @@ async def _upsert_team(country: str) -> str:
     return team_id
 
 
-# ---------------------------------------------------------------------
-# Match parsing
-# ---------------------------------------------------------------------
-
-def _parse_score(match: dict) -> tuple[int | None, int | None]:
-    """openfootball stores score as 'score' dict or {'ft': [h, a]} or {'score1', 'score2'}."""
-    if "score" in match and isinstance(match["score"], dict):
-        ft = match["score"].get("ft") or match["score"].get("fullTime")
+def _score_from_match(match: dict) -> tuple[int | None, int | None]:
+    """Derive (home_goals, away_goals) from openfootball match payload."""
+    # Preferred: explicit score dict
+    score = match.get("score")
+    if isinstance(score, dict):
+        ft = score.get("ft") or score.get("fullTime")
         if isinstance(ft, list) and len(ft) == 2:
-            return int(ft[0]), int(ft[1])
-    if "score1" in match and "score2" in match:
-        try:
-            return int(match["score1"]), int(match["score2"])
-        except (TypeError, ValueError):
-            return None, None
+            try:
+                return int(ft[0]), int(ft[1])
+            except (TypeError, ValueError):
+                pass
+
+    # Fallback: count goal events
+    goals1 = match.get("goals1")
+    goals2 = match.get("goals2")
+    if isinstance(goals1, list) and isinstance(goals2, list):
+        return len(goals1), len(goals2)
+
     return None, None
 
 
-def _team_name(team_field) -> str | None:
-    """openfootball team field can be a string or {'name': ..., 'code': ...}."""
-    if isinstance(team_field, str):
-        return team_field
-    if isinstance(team_field, dict):
-        return team_field.get("name") or team_field.get("country")
-    return None
-
-
-async def _upsert_match(match: dict, competition_code: str, stage_default: str) -> bool:
-    """Upsert a single match from openfootball JSON. Returns True on success."""
+async def _upsert_match(match: dict, competition_code: str) -> bool:
+    """Upsert one openfootball match. Returns True on success, False otherwise."""
     db = get_client()
 
-    home_name = _team_name(match.get("team1"))
-    away_name = _team_name(match.get("team2"))
-    if not home_name or not away_name:
+    home_name = match.get("team1")
+    away_name = match.get("team2")
+    date_str = match.get("date")
+    if not home_name or not away_name or not date_str:
         return False
 
-    home_id = await _upsert_team(home_name)
-    away_id = await _upsert_team(away_name)
-    home_goals, away_goals = _parse_score(match)
+    # Build a valid ISO timestamp
+    time_str = match.get("time") or "00:00"
+    # openfootball times look like "19:00"; sanitize to HH:MM
+    m = re.match(r"(\d{1,2}:\d{2})", str(time_str))
+    time_clean = m.group(1) if m else "00:00"
+    # Pad to HH:MM if needed
+    h, mm = time_clean.split(":")
+    kickoff = f"{date_str}T{h.zfill(2)}:{mm}:00Z"
 
-    # Stage may be on the match or inherited from the parent round
-    stage = STAGE_MAP.get(match.get("group", stage_default), stage_default)
+    home_id = await _upsert_team(str(home_name))
+    away_id = await _upsert_team(str(away_name))
+    home_goals, away_goals = _score_from_match(match)
+    stage = _stage_from_round(match.get("round", ""), match.get("group"))
 
-    # Build a deterministic UUID per match
-    kickoff = match.get("date") or match.get("utcDate") or ""
-    if "time" in match:
-        kickoff = f"{kickoff}T{match['time']}:00Z"
-    elif kickoff and "T" not in kickoff:
-        kickoff = f"{kickoff}T00:00:00Z"
-
-    external_key = f"openfootball:{competition_code}:{home_name}-{away_name}-{kickoff}"
+    external_key = f"openfootball:{competition_code}:{home_name}-{away_name}-{date_str}"
     match_uuid = str(uuid.uuid5(uuid.NAMESPACE_URL, external_key))
 
-    db.table("matches").upsert({
+    row = {
         "id":          match_uuid,
         "home_id":     home_id,
         "away_id":     away_id,
         "kickoff":     kickoff,
-        "venue":       match.get("city") or match.get("stadium") or "",
+        "venue":       match.get("ground") or "",
         "stage":       stage,
         "competition": competition_code,
         "is_neutral":  True,
         "home_goals":  home_goals,
         "away_goals":  away_goals,
         "completed":   home_goals is not None,
-    }, on_conflict="id").execute()
+    }
+    db.table("matches").upsert(row, on_conflict="id").execute()
     return True
 
 
-# ---------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------
-
 async def refresh_competition(competition_code: str) -> int:
-    """Pull all matches for one competition from openfootball. Returns count."""
+    """Pull all matches for one competition from openfootball."""
     url = SOURCES.get(competition_code)
     if not url:
         log.error("openfootball.unknown_competition", code=competition_code)
         return 0
 
     written = 0
+    failed = 0
     async with httpx.AsyncClient() as client:
         try:
             data = await _fetch_json(client, url)
@@ -170,19 +196,24 @@ async def refresh_competition(competition_code: str) -> int:
             log.error("openfootball.fetch_failed", code=competition_code, error=str(e))
             return 0
 
-        # openfootball structures: {rounds: [{name, matches: [...]}]} or top-level {matches: [...]}
-        rounds = data.get("rounds") or [{"name": "", "matches": data.get("matches", [])}]
-        for rnd in rounds:
-            round_name = rnd.get("name", "")
-            stage_default = STAGE_MAP.get(round_name, "group" if "Group" in round_name else "qual")
-            for m in rnd.get("matches", []):
-                try:
-                    if await _upsert_match(m, competition_code, stage_default):
-                        written += 1
-                except Exception as e:
-                    log.warning("openfootball.match_failed", error=str(e))
+        matches = data.get("matches", [])
+        log.info("openfootball.fetched", code=competition_code, total=len(matches))
 
-    log.info("openfootball.competition_done", code=competition_code, written=written)
+        for m in matches:
+            try:
+                if await _upsert_match(m, competition_code):
+                    written += 1
+            except Exception as e:
+                failed += 1
+                # Only log first 3 failures to avoid spamming
+                if failed <= 3:
+                    log.warning("openfootball.match_failed",
+                                code=competition_code,
+                                team1=m.get("team1"), team2=m.get("team2"),
+                                error=str(e)[:300])
+
+    log.info("openfootball.competition_done",
+             code=competition_code, written=written, failed=failed)
     return written
 
 
