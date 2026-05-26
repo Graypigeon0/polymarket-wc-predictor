@@ -1,0 +1,48 @@
+name: Backfill Historical Data
+
+# Manual-only workflow to pull historical match data for backtesting.
+# Run this once after first deploy to populate Euros 2024, prior WCs, etc.
+on:
+  workflow_dispatch:
+    inputs:
+      competition:
+        description: 'Competition to backfill (or "ALL" for everything)'
+        required: true
+        default: 'WC2022'
+        type: choice
+        options:
+          - ALL
+          - WC2026
+          - WC2022
+          - WC2018
+          - WC2014
+          - EURO2024
+          - EURO2020
+          - NATIONS
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25  # rate-limited so this can take a while
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -e .
+      - name: Run backfill
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          FOOTBALL_DATA_API_KEY: ${{ secrets.FOOTBALL_DATA_API_KEY }}
+        run: |
+          if [ "${{ inputs.competition }}" = "ALL" ]; then
+            python -m backend.main backfill-all
+          else
+            python -m backend.main backfill --competition "${{ inputs.competition }}"
+          fi

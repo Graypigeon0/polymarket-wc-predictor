@@ -51,14 +51,14 @@ async def poll_polymarket() -> None:
 
 
 async def refresh_squads() -> None:
-    """Refresh squad data from Sofascore + FBref + football-data.org."""
+    """Refresh fixtures, then squad/player data from Sofascore + FBref."""
     from backend.ingestion import fbref, football_data, sofascore
 
     log.info("refresh_squads.start")
+    fixtures_written = await football_data.refresh_fixtures()
     await sofascore.refresh_players()
     await fbref.refresh_underlying_stats()
-    await football_data.refresh_fixtures()
-    log.info("refresh_squads.done")
+    log.info("refresh_squads.done", fixtures=fixtures_written)
 
 
 async def run_match_models() -> None:
@@ -154,9 +154,18 @@ def once(job: str) -> None:
 
 @cli.command()
 def backfill(competition: str = "EURO2024") -> None:
-    """Backfill historical match data for a competition (for validation)."""
-    typer.echo(f"Backfill for {competition} not yet implemented.")
-    # TODO: pull historical results from football-data.org, populate matches table
+    """Backfill historical match data for one competition (for validation)."""
+    from backend.ingestion import football_data
+    written = asyncio.run(football_data.refresh_competition(competition))
+    typer.echo(f"Backfill complete for {competition}: {written} matches written.")
+
+
+@cli.command(name="backfill-all")
+def backfill_all() -> None:
+    """One-shot pull of every configured competition. Slow (rate-limited)."""
+    from backend.ingestion import football_data
+    total = asyncio.run(football_data.refresh_fixtures())
+    typer.echo(f"Backfill complete: {total} matches written across all comps.")
 
 
 if __name__ == "__main__":
