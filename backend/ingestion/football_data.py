@@ -38,14 +38,12 @@ BASE_URL = "https://api.football-data.org/v4"
 
 # Mapping of internal competition codes to football-data.org competition codes
 # and the relevant seasons to pull
+# football-data.org free tier (TIER_ONE) only includes the current season for
+# each competition. Historical seasons return 403. We use this source only for
+# live WC 2026 fixtures + results. For historical backtest data we use the
+# openfootball ingester instead (see backend/ingestion/openfootball.py).
 COMPETITIONS: dict[str, dict[str, Any]] = {
     "WC2026":     {"code": "WC",  "seasons": [2026]},
-    "WC2022":     {"code": "WC",  "seasons": [2022]},
-    "WC2018":     {"code": "WC",  "seasons": [2018]},
-    "WC2014":     {"code": "WC",  "seasons": [2014]},
-    "EURO2024":   {"code": "EC",  "seasons": [2024]},
-    "EURO2020":   {"code": "EC",  "seasons": [2020]},
-    "NATIONS":    {"code": "UNL", "seasons": [2024, 2022]},
 }
 
 

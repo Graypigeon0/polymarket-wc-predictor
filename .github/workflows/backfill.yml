@@ -1,14 +1,12 @@
 name: Backfill Historical Data
 
-# Manual-only workflow to pull historical match data for backtesting.
-# Run this once after first deploy to populate Euros 2024, prior WCs, etc.
 on:
   workflow_dispatch:
     inputs:
       competition:
-        description: 'Competition to backfill (or "ALL" for everything)'
+        description: 'Competition to backfill'
         required: true
-        default: 'WC2022'
+        default: 'ALL'
         type: choice
         options:
           - ALL
@@ -18,12 +16,11 @@ on:
           - WC2014
           - EURO2024
           - EURO2020
-          - NATIONS
 
 jobs:
   backfill:
     runs-on: ubuntu-latest
-    timeout-minutes: 25  # rate-limited so this can take a while
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6

@@ -153,19 +153,25 @@ def once(job: str) -> None:
 
 
 @cli.command()
-def backfill(competition: str = "EURO2024") -> None:
-    """Backfill historical match data for one competition (for validation)."""
-    from backend.ingestion import football_data
-    written = asyncio.run(football_data.refresh_competition(competition))
+def backfill(competition: str = "WC2022") -> None:
+    """Backfill one competition. WC2026 hits football-data.org (live data),
+    everything else uses openfootball (historical)."""
+    if competition == "WC2026":
+        from backend.ingestion import football_data
+        written = asyncio.run(football_data.refresh_competition(competition))
+    else:
+        from backend.ingestion import openfootball
+        written = asyncio.run(openfootball.refresh_competition(competition))
     typer.echo(f"Backfill complete for {competition}: {written} matches written.")
 
 
 @cli.command(name="backfill-all")
 def backfill_all() -> None:
-    """One-shot pull of every configured competition. Slow (rate-limited)."""
-    from backend.ingestion import football_data
-    total = asyncio.run(football_data.refresh_fixtures())
-    typer.echo(f"Backfill complete: {total} matches written across all comps.")
+    """Pull WC2026 fixtures + all historical competitions in one go."""
+    from backend.ingestion import football_data, openfootball
+    live = asyncio.run(football_data.refresh_fixtures())
+    historical = asyncio.run(openfootball.refresh_all())
+    typer.echo(f"Backfill complete: {live} live + {historical} historical = {live + historical} matches.")
 
 
 if __name__ == "__main__":
