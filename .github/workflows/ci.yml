@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install
+        run: |
+          pip install -e ".[dev]"
+      - name: Lint
+        run: ruff check backend
+      - name: Tests
+        env:
+          SUPABASE_URL: http://placeholder
+          SUPABASE_SERVICE_KEY: placeholder
+          MISTRAL_API_KEY: placeholder
+          TELEGRAM_BOT_TOKEN: placeholder
+          TELEGRAM_CHAT_ID: placeholder
+        run: pytest -q
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm install
+      - run: npm run typecheck
+      - run: npm run build
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: http://placeholder
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: placeholder
