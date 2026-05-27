@@ -1,14 +1,15 @@
 name: Fit Model
 
-# Run Dixon-Coles fitting on historical match data.
-# Manual trigger only — typically only run after a backfill or weekly refresh.
+# Run robust Dixon-Coles fitting on historical match data.
+# Manual trigger only — typically run after a backfill or weekly refresh.
+# Robust IRLS does ~5 iterations so this is slower than vanilla MLE.
 on:
   workflow_dispatch: {}
 
 jobs:
   fit:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6

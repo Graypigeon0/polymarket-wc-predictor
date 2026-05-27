@@ -1,25 +1,24 @@
 """
-Dixon-Coles bivariate Poisson match model.
+Dixon-Coles bivariate Poisson match model with robust iteratively
+reweighted MLE for opponent-strength bias correction.
 
 Reference:
   Dixon, M.J. & Coles, S.G. (1997). Modelling Association Football Scores
   and Inefficiencies in the Football Betting Market.
 
-For each team we fit:
-  - attack[i]:  log-rate of scoring
-  - defense[i]: log-rate of conceding (lower = better defense)
-  - home_adv:   global home advantage
-  - rho:        low-score correlation parameter (Dixon-Coles tau function)
+Per team we fit attack[i] (log scoring rate) and defense[i] (log conceding
+rate), plus global home_adv and Dixon-Coles rho.
 
-Expected goals (neutral venue):
-  lambda_h = exp(attack[h] + defense[a])
-  lambda_a = exp(attack[a] + defense[h])
+Robust fit overview:
+  1. Initial MLE with recency + competition weights
+  2. Compute Pearson-style residuals for every match
+  3. Tukey bisquare weights downweight anomalous matches
+     (e.g. Spain 7-0 Andorra, where actual goals far exceeded prediction)
+  4. Refit with the new weights * original weights
+  5. Iterate until ratings stabilise (~5 iterations)
 
-Joint score: tau(x,y,lambda_h,lambda_a,rho) * Poisson(x;lambda_h) * Poisson(y;lambda_a)
-
-Fitted with weighted maximum likelihood:
-  - Exponential time decay (half-life 18 months)
-  - Competition weight (WC=1.0, EURO/COPA=0.85, qualifier=0.7, friendly=0.4)
+This corrects opponent-strength bias: easy blowouts against weak qualifiers
+no longer dominate the elite teams' attack ratings.
 """
 
 from __future__ import annotations
@@ -55,7 +54,7 @@ class MatchPrediction:
 
 
 # ---------------------------------------------------------------------
-# Dixon-Coles tau function (low-score correlation correction)
+# Dixon-Coles tau function (low-score correlation)
 # ---------------------------------------------------------------------
 
 def _tau(x: int, y: int, lh: float, la: float, rho: float) -> float:
@@ -71,7 +70,6 @@ def _tau(x: int, y: int, lh: float, la: float, rho: float) -> float:
 
 
 def score_grid(lh: float, la: float, rho: float, max_goals: int = 8) -> np.ndarray:
-    """Return a (max_goals+1) x (max_goals+1) matrix of joint score probs."""
     grid = np.zeros((max_goals + 1, max_goals + 1))
     for x in range(max_goals + 1):
         for y in range(max_goals + 1):
@@ -117,28 +115,22 @@ def predict_match(
 
 
 # ---------------------------------------------------------------------
-# Fitting
+# Configuration
 # ---------------------------------------------------------------------
 
-# Competition weights for weighted MLE
-# Competition weights for weighted MLE. Major tournaments weight = 1.0;
-# continental cups slightly lower; qualifiers and Nations League fairly high
-# (competitive, current squads); friendlies low (rotated lineups, low stakes).
 COMPETITION_WEIGHTS: dict[str, float] = {
-    # Tournament finals (handled by openfootball)
     "WC2026":     1.00,
     "WC2022":     1.00,
     "WC2018":     1.00,
     "WC2014":     1.00,
     "EURO2024":   0.85,
     "EURO2020":   0.85,
-    # From martj42 dataset
-    "WCMAIN":     1.00,    # WC matches not in openfootball
-    "WCQUAL":     0.75,    # World Cup qualifiers
+    "WCMAIN":     1.00,
+    "WCQUAL":     0.75,
     "EURMAIN":    0.85,
     "EURQUAL":    0.70,
-    "UNL":        0.70,    # UEFA Nations League
-    "CNL":        0.65,    # CONCACAF Nations League
+    "UNL":        0.70,
+    "CNL":        0.65,
     "COPA":       0.85,
     "AFCON":      0.70,
     "AFCONQUAL":  0.55,
@@ -150,54 +142,73 @@ COMPETITION_WEIGHTS: dict[str, float] = {
     "OTHER":      0.30,
 }
 
-# Half-life for exponential time decay (months)
 RECENCY_HALF_LIFE_MONTHS = 18.0
 
+# L2 regularization strength (shrinks ratings toward 0)
+REG_LAMBDA = 8.0
+
+# Robust regression parameters
+ROBUST_ITERATIONS = 5            # number of IRLS passes
+TUKEY_C = 4.0                    # bisquare cutoff; smaller = more aggressive downweighting
+MIN_RESIDUAL_WEIGHT = 0.05       # floor so no match is fully excluded
+
+
+# ---------------------------------------------------------------------
+# Data loading
+# ---------------------------------------------------------------------
 
 def _recency_weight(match_date: datetime, ref_date: datetime) -> float:
-    """Exponential decay weight: 1.0 at ref_date, halves every 18 months."""
     months_old = (ref_date - match_date).days / 30.44
     return 0.5 ** (max(0.0, months_old) / RECENCY_HALF_LIFE_MONTHS)
 
 
 def _load_training_matches() -> list[dict[str, Any]]:
-    """Pull completed historical matches from Supabase."""
     db = get_client()
-    # Only completed matches with scores; skip WC2026 (current tournament, no results yet)
-    r = (db.table("matches")
-         .select("home_id,away_id,kickoff,home_goals,away_goals,competition")
-         .eq("completed", True)
-         .neq("competition", "WC2026")
-         .execute())
-    return r.data or []
+    # Paginate — Supabase default limit is 1000 rows per query.
+    all_rows: list[dict[str, Any]] = []
+    page_size = 1000
+    offset = 0
+    while True:
+        r = (db.table("matches")
+             .select("home_id,away_id,kickoff,home_goals,away_goals,competition")
+             .eq("completed", True)
+             .neq("competition", "WC2026")
+             .range(offset, offset + page_size - 1)
+             .execute())
+        rows = r.data or []
+        all_rows.extend(rows)
+        if len(rows) < page_size:
+            break
+        offset += page_size
+    return all_rows
 
 
 def _build_team_index(matches: list[dict]) -> dict[str, int]:
-    """Assign each team UUID to a contiguous integer index 0..N-1."""
     teams = sorted({m["home_id"] for m in matches} | {m["away_id"] for m in matches})
     return {tid: i for i, tid in enumerate(teams)}
 
 
-# L2 regularization strength (Bayesian-style shrinkage toward global mean = 0).
-# Higher = stronger pull toward equality. ~8 is moderate for ~60 teams / ~300 matches.
-REG_LAMBDA = 8.0
-
+# ---------------------------------------------------------------------
+# Likelihood
+# ---------------------------------------------------------------------
 
 def _neg_log_likelihood(
     params: np.ndarray,
     matches: list[dict],
     team_idx: dict[str, int],
     n_teams: int,
-    ref_date: datetime,
+    match_weights: np.ndarray,
 ) -> float:
-    """Negative log-likelihood + L2 regularization."""
     attacks = params[:n_teams]
     defenses = params[n_teams:2 * n_teams]
     home_adv = params[-2]
     rho = params[-1]
 
     total = 0.0
-    for m in matches:
+    for k, m in enumerate(matches):
+        w = float(match_weights[k])
+        if w < 1e-9:
+            continue
         i = team_idx[m["home_id"]]
         j = team_idx[m["away_id"]]
         x = int(m["home_goals"])
@@ -215,27 +226,61 @@ def _neg_log_likelihood(
             + math.log(max(tau, 1e-10))
         )
 
-        kickoff = datetime.fromisoformat(m["kickoff"].replace("Z", "+00:00"))
-        w_recency = _recency_weight(kickoff, ref_date)
-        w_comp = COMPETITION_WEIGHTS.get(m["competition"], 0.5)
-        w = w_recency * w_comp
-
         total -= w * log_p
 
-    # L2 regularization: pull attack/defense toward 0 (the global mean,
-    # since sum-to-zero constraint is enforced). This stabilises ratings
-    # for teams with few matches in the training set.
+    # L2 regularization (shrinkage toward 0)
     reg = REG_LAMBDA * float(np.sum(attacks ** 2) + np.sum(defenses ** 2))
     return total + reg
 
 
-async def fit() -> dict[str, Any]:
-    """
-    Fit Dixon-Coles attack/defense ratings via weighted MLE.
+# ---------------------------------------------------------------------
+# Residual-based robust weights
+# ---------------------------------------------------------------------
 
-    Persists fitted ratings to `teams.base_attack`, `teams.base_defense`.
-    Returns fit summary: {teams, n_matches, rho, home_adv, nll}.
-    """
+def _pearson_residuals(
+    params: np.ndarray,
+    matches: list[dict],
+    team_idx: dict[str, int],
+    n_teams: int,
+) -> np.ndarray:
+    """Per-match Pearson residual on the goal-difference axis."""
+    attacks = params[:n_teams]
+    defenses = params[n_teams:2 * n_teams]
+    home_adv = params[-2]
+
+    residuals = np.zeros(len(matches))
+    for k, m in enumerate(matches):
+        i = team_idx[m["home_id"]]
+        j = team_idx[m["away_id"]]
+        x = int(m["home_goals"])
+        y = int(m["away_goals"])
+
+        lh = math.exp(attacks[i] + defenses[j] + home_adv)
+        la = math.exp(attacks[j] + defenses[i])
+        lh = min(lh, 8.0)
+        la = min(la, 8.0)
+
+        # Standardised Pearson residual for total goals
+        actual_total = x + y
+        expected_total = lh + la
+        sd = math.sqrt(max(expected_total, 0.5))
+        residuals[k] = (actual_total - expected_total) / sd
+    return residuals
+
+
+def _tukey_weights(residuals: np.ndarray, c: float = TUKEY_C) -> np.ndarray:
+    """Tukey bisquare: smooth zero outside [-c, c]. Used to downweight outliers."""
+    r = np.abs(residuals) / c
+    w = np.where(r < 1.0, (1.0 - r ** 2) ** 2, 0.0)
+    return np.maximum(w, MIN_RESIDUAL_WEIGHT)
+
+
+# ---------------------------------------------------------------------
+# Fitting (robust IRLS)
+# ---------------------------------------------------------------------
+
+async def fit() -> dict[str, Any]:
+    """Fit Dixon-Coles ratings with robust iteratively reweighted MLE."""
     log.info("dixon_coles.fit.start")
     matches = _load_training_matches()
     if len(matches) < 50:
@@ -244,39 +289,70 @@ async def fit() -> dict[str, Any]:
 
     team_idx = _build_team_index(matches)
     n_teams = len(team_idx)
-    log.info("dixon_coles.fit.data", n_matches=len(matches), n_teams=n_teams)
+    n_matches = len(matches)
+    log.info("dixon_coles.fit.data", n_matches=n_matches, n_teams=n_teams)
 
-    # Initial guess: all attacks/defenses 0, home_adv = 0.1, rho = -0.05
-    x0 = np.zeros(2 * n_teams + 2)
-    x0[-2] = 0.1     # home_adv
-    x0[-1] = -0.05   # rho
-
+    # Pre-compute static weights (recency + competition)
     ref_date = datetime.now(timezone.utc)
+    base_weights = np.zeros(n_matches)
+    for k, m in enumerate(matches):
+        kickoff = datetime.fromisoformat(m["kickoff"].replace("Z", "+00:00"))
+        wr = _recency_weight(kickoff, ref_date)
+        wc = COMPETITION_WEIGHTS.get(m["competition"], 0.4)
+        base_weights[k] = wr * wc
 
-    # Sum-to-zero constraint on attack ratings (identifiability)
+    # Initial params: zeros + home_adv 0.1, rho -0.05
+    x0 = np.zeros(2 * n_teams + 2)
+    x0[-2] = 0.1
+    x0[-1] = -0.05
+
     constraint = {"type": "eq", "fun": lambda p: float(np.sum(p[:n_teams]))}
-    # Reasonable bounds to keep optimisation stable
     bounds = [(-3.0, 3.0)] * (2 * n_teams) + [(-0.5, 1.0), (-0.2, 0.2)]
 
-    result = minimize(
-        _neg_log_likelihood,
-        x0,
-        args=(matches, team_idx, n_teams, ref_date),
-        method="SLSQP",
-        bounds=bounds,
-        constraints=[constraint],
-        options={"maxiter": 200, "ftol": 1e-5},
-    )
+    params = x0
+    nll_history = []
+    weights = base_weights.copy()
 
-    if not result.success:
-        log.warning("dixon_coles.fit.optimizer_warning", msg=result.message)
+    for iteration in range(ROBUST_ITERATIONS):
+        # Looser tolerance for early iterations (we'll refine later)
+        ftol = 1e-4 if iteration < ROBUST_ITERATIONS - 1 else 1e-6
 
-    attacks = result.x[:n_teams]
-    defenses = result.x[n_teams:2 * n_teams]
-    home_adv = float(result.x[-2])
-    rho = float(result.x[-1])
+        result = minimize(
+            _neg_log_likelihood,
+            params,
+            args=(matches, team_idx, n_teams, weights),
+            method="SLSQP",
+            bounds=bounds,
+            constraints=[constraint],
+            options={"maxiter": 200, "ftol": ftol},
+        )
+        params = result.x
+        nll_history.append(float(result.fun))
 
-    # Persist back to Supabase
+        # Compute robust weights based on current fit
+        resid = _pearson_residuals(params, matches, team_idx, n_teams)
+        robust_w = _tukey_weights(resid)
+        new_weights = base_weights * robust_w
+
+        # Check convergence: how much did weights change?
+        weight_change = float(np.abs(new_weights - weights).sum() / weights.sum())
+        log.info("dixon_coles.fit.iteration",
+                 iter=iteration + 1,
+                 nll=nll_history[-1],
+                 downweighted=int((robust_w < 0.5).sum()),
+                 weight_change=weight_change)
+
+        weights = new_weights
+        if weight_change < 0.01:
+            log.info("dixon_coles.fit.converged", iter=iteration + 1)
+            break
+
+    attacks = params[:n_teams]
+    defenses = params[n_teams:2 * n_teams]
+    home_adv = float(params[-2])
+    rho = float(params[-1])
+
+    # Persist ratings back to Supabase
     db = get_client()
     updated = 0
     for team_id, idx in team_idx.items():
@@ -288,31 +364,31 @@ async def fit() -> dict[str, Any]:
         updated += 1
 
     log.info("dixon_coles.fit.done",
-             n_teams=n_teams, n_matches=len(matches),
+             n_teams=n_teams, n_matches=n_matches,
              home_adv=home_adv, rho=rho,
-             updated=updated, nll=float(result.fun))
+             updated=updated, nll=nll_history[-1],
+             iterations=len(nll_history))
 
     return {
-        "n_teams":    n_teams,
-        "n_matches":  len(matches),
-        "home_adv":   home_adv,
-        "rho":        rho,
-        "nll":        float(result.fun),
-        "converged":  bool(result.success),
-        "rho_global": rho,  # store as engine-wide constant if needed later
+        "n_teams":      n_teams,
+        "n_matches":    n_matches,
+        "home_adv":     home_adv,
+        "rho":          rho,
+        "nll":          nll_history[-1],
+        "iterations":   len(nll_history),
+        "nll_history":  nll_history,
     }
 
 
+# ---------------------------------------------------------------------
+# Prediction
+# ---------------------------------------------------------------------
+
 async def predict_upcoming() -> int:
-    """
-    For every uncompleted match in `matches`, compute and upsert a
-    match_predictions row using the latest fitted team ratings.
-    Returns count of predictions written.
-    """
+    """Generate match_predictions rows for every uncompleted match."""
     s = get_settings()
     db = get_client()
 
-    # Load fitted ratings
     teams_resp = db.table("teams").select("id,base_attack,base_defense,home_adv").execute()
     ratings = {t["id"]: t for t in (teams_resp.data or [])
                if t.get("base_attack") is not None}
@@ -321,8 +397,6 @@ async def predict_upcoming() -> int:
         log.warning("dixon_coles.predict.no_ratings_fit_first")
         return 0
 
-    # Use a shared rho — pulled from any one team's home_adv... actually we store rho per-engine.
-    # For simplicity use a constant fitted value; we re-fit periodically.
     rho = -0.05
     home_adv_global = next(iter(ratings.values())).get("home_adv", 0.0) or 0.0
 
@@ -336,7 +410,7 @@ async def predict_upcoming() -> int:
         h = ratings.get(m["home_id"])
         a = ratings.get(m["away_id"])
         if not h or not a:
-            continue  # missing fit for this team (e.g. new country)
+            continue
 
         home_adv = 0.0 if m.get("is_neutral", True) else home_adv_global
         pred = predict_match(
@@ -345,8 +419,6 @@ async def predict_upcoming() -> int:
             rho=rho, home_adv=home_adv,
         )
 
-        # Delete any prior prediction for this match (keeps the table
-        # idempotent — re-running predict overwrites instead of duplicating).
         db.table("match_predictions").delete().eq("match_id", m["id"]).execute()
         db.table("match_predictions").insert({
             "match_id":            m["id"],
