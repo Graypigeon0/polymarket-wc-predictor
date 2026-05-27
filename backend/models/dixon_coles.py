@@ -162,6 +162,11 @@ def _build_team_index(matches: list[dict]) -> dict[str, int]:
     return {tid: i for i, tid in enumerate(teams)}
 
 
+# L2 regularization strength (Bayesian-style shrinkage toward global mean = 0).
+# Higher = stronger pull toward equality. ~8 is moderate for ~60 teams / ~300 matches.
+REG_LAMBDA = 8.0
+
+
 def _neg_log_likelihood(
     params: np.ndarray,
     matches: list[dict],
@@ -169,7 +174,7 @@ def _neg_log_likelihood(
     n_teams: int,
     ref_date: datetime,
 ) -> float:
-    """Negative log-likelihood across all training matches with weights."""
+    """Negative log-likelihood + L2 regularization."""
     attacks = params[:n_teams]
     defenses = params[n_teams:2 * n_teams]
     home_adv = params[-2]
@@ -184,21 +189,16 @@ def _neg_log_likelihood(
 
         lh = math.exp(attacks[i] + defenses[j] + home_adv)
         la = math.exp(attacks[j] + defenses[i])
-
-        # Clip lambdas to keep numerically sane
         lh = min(lh, 8.0)
         la = min(la, 8.0)
 
-        # Probability of this exact scoreline under DC
         tau = _tau(x, y, lh, la, rho)
-        # Log Poisson PMFs
         log_p = (
             x * math.log(lh) - lh - math.lgamma(x + 1)
             + y * math.log(la) - la - math.lgamma(y + 1)
             + math.log(max(tau, 1e-10))
         )
 
-        # Recency + competition weights
         kickoff = datetime.fromisoformat(m["kickoff"].replace("Z", "+00:00"))
         w_recency = _recency_weight(kickoff, ref_date)
         w_comp = COMPETITION_WEIGHTS.get(m["competition"], 0.5)
@@ -206,7 +206,11 @@ def _neg_log_likelihood(
 
         total -= w * log_p
 
-    return total
+    # L2 regularization: pull attack/defense toward 0 (the global mean,
+    # since sum-to-zero constraint is enforced). This stabilises ratings
+    # for teams with few matches in the training set.
+    reg = REG_LAMBDA * float(np.sum(attacks ** 2) + np.sum(defenses ** 2))
+    return total + reg
 
 
 async def fit() -> dict[str, Any]:
