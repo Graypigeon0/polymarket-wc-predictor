@@ -174,9 +174,6 @@ def backfill_all() -> None:
     typer.echo(f"Backfill complete: {live} live + {historical} historical = {live + historical} matches.")
 
 
-if __name__ == "__main__":
-    cli()
-
 @cli.command(name="db-test")
 def db_test() -> None:
     """Diagnostic: insert a test team into Supabase and read it back."""
@@ -217,3 +214,6 @@ def db_test() -> None:
     db.table("teams").delete().eq("fifa_code", test_code).execute()
     typer.echo("Cleanup complete.")
 
+
+if __name__ == "__main__":
+    cli()
