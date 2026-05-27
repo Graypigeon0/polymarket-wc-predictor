@@ -232,5 +232,14 @@ def predict() -> None:
     typer.echo(f"Wrote {n} predictions.")
 
 
+
+@cli.command(name="backfill-martj42")
+def backfill_martj42(years: int = 5) -> None:
+    """Pull last N years of international results from martj42 dataset."""
+    from backend.ingestion import martj42
+    n = asyncio.run(martj42.refresh(lookback_years=years))
+    typer.echo(f"martj42 backfill complete: {n} matches written (last {years} years).")
+
+
 if __name__ == "__main__":
     cli()

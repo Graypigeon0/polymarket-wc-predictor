@@ -1,0 +1,32 @@
+name: Backfill International Results
+
+# One-shot pull of last N years of international football results
+# from the martj42 dataset (friendlies, qualifiers, all comps).
+on:
+  workflow_dispatch:
+    inputs:
+      years:
+        description: 'Years of history to pull (default 5)'
+        required: false
+        default: '5'
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -e .
+      - name: Run backfill
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python -m backend.main backfill-martj42 --years ${{ inputs.years }}

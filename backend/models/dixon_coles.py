@@ -121,17 +121,33 @@ def predict_match(
 # ---------------------------------------------------------------------
 
 # Competition weights for weighted MLE
+# Competition weights for weighted MLE. Major tournaments weight = 1.0;
+# continental cups slightly lower; qualifiers and Nations League fairly high
+# (competitive, current squads); friendlies low (rotated lineups, low stakes).
 COMPETITION_WEIGHTS: dict[str, float] = {
-    "WC2026":   1.00,
-    "WC2022":   1.00,
-    "WC2018":   1.00,
-    "WC2014":   1.00,
-    "EURO2024": 0.85,
-    "EURO2020": 0.85,
-    "COPA2024": 0.85,
-    "NATIONS":  0.70,
-    "QUAL":     0.70,
-    "FRIENDLY": 0.40,
+    # Tournament finals (handled by openfootball)
+    "WC2026":     1.00,
+    "WC2022":     1.00,
+    "WC2018":     1.00,
+    "WC2014":     1.00,
+    "EURO2024":   0.85,
+    "EURO2020":   0.85,
+    # From martj42 dataset
+    "WCMAIN":     1.00,    # WC matches not in openfootball
+    "WCQUAL":     0.75,    # World Cup qualifiers
+    "EURMAIN":    0.85,
+    "EURQUAL":    0.70,
+    "UNL":        0.70,    # UEFA Nations League
+    "CNL":        0.65,    # CONCACAF Nations League
+    "COPA":       0.85,
+    "AFCON":      0.70,
+    "AFCONQUAL":  0.55,
+    "ASIAN":      0.65,
+    "ASIANQUAL":  0.50,
+    "GOLDCUP":    0.70,
+    "OFC":        0.50,
+    "FRIENDLY":   0.40,
+    "OTHER":      0.30,
 }
 
 # Half-life for exponential time decay (months)
@@ -329,6 +345,9 @@ async def predict_upcoming() -> int:
             rho=rho, home_adv=home_adv,
         )
 
+        # Delete any prior prediction for this match (keeps the table
+        # idempotent — re-running predict overwrites instead of duplicating).
+        db.table("match_predictions").delete().eq("match_id", m["id"]).execute()
         db.table("match_predictions").insert({
             "match_id":            m["id"],
             "model_version":       s.model_version,
