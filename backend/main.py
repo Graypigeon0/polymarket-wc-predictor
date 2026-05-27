@@ -215,5 +215,22 @@ def db_test() -> None:
     typer.echo("Cleanup complete.")
 
 
+
+@cli.command()
+def fit() -> None:
+    """Fit Dixon-Coles base ratings on historical matches; persist to DB."""
+    from backend.models import dixon_coles
+    result = asyncio.run(dixon_coles.fit())
+    typer.echo(f"Fit result: {result}")
+
+
+@cli.command()
+def predict() -> None:
+    """Generate match_predictions rows for all upcoming WC fixtures."""
+    from backend.models import dixon_coles
+    n = asyncio.run(dixon_coles.predict_upcoming())
+    typer.echo(f"Wrote {n} predictions.")
+
+
 if __name__ == "__main__":
     cli()

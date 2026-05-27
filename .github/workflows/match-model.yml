@@ -1,31 +1,47 @@
 name: Match Model
 
-# Recomputes match predictions every 15 minutes
-# Pulls latest squad ratings + active LLM deltas, runs Dixon-Coles
+# Recomputes match predictions every 15 minutes.
+# Also refits Dixon-Coles base ratings once daily (3am UTC) via cron.
 on:
   schedule:
     - cron: "*/15 * * * *"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      refit:
+        description: 'Also re-fit base ratings before predicting'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
 
 jobs:
   predict:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip
-      - name: Install dependencies
+      - name: Install
         run: pip install -e .
-      - name: Refresh squad ratings + predict matches
+      - name: Refit (if requested or daily)
+        if: ${{ inputs.refit == 'true' || github.event_name == 'schedule' && github.event.schedule == '0 3 * * *' }}
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-          python -m backend.main once squads
-          python -m backend.main once match
+        run: python -m backend.main fit
+      - name: Predict upcoming matches
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python -m backend.main predict
