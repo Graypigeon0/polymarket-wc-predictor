@@ -230,8 +230,8 @@ async def recompute_all() -> dict[str, int]:
         fair_pm_prob = pm_prob / overround if overround > 0 else pm_prob
         edge = model_prob - fair_pm_prob
 
-        # 4. Always log it (store the fair price as pm_prob, raw kept in note)
-        db.table("edges").insert({
+        # 4. Always log it (store the fair price as pm_prob)
+        ins = db.table("edges").insert({
             "market_id":     token_id,
             "model_prob":    model_prob,
             "pm_prob":       fair_pm_prob,
@@ -240,32 +240,31 @@ async def recompute_all() -> dict[str, int]:
             "model_version": model_version,
             "alerted":       False,
         }).execute()
+        edge_row_id = (ins.data[0]["id"] if ins.data else None)
 
         if edge > s.edge_alert_threshold:
             stats["edged"] += 1
             if await _was_recently_alerted(token_id, db, s.edge_alert_cooldown_minutes):
+                stats["cooldown_skip"] = stats.get("cooldown_skip", 0) + 1
                 continue
             label = m.get("outcome_label") or m.get("description") or token_id[:16]
             polymarket_url = f"https://polymarket.com/market/{token_id}"
-            try:
-                await telegram.alert(
-                    market_label=label,
-                    market_url=polymarket_url,
-                    model_prob=model_prob,
-                    pm_prob=fair_pm_prob,
-                    edge=edge,
-                )
-                # Mark alerted
+            sent = await telegram.alert(
+                market_label=label,
+                market_url=polymarket_url,
+                model_prob=model_prob,
+                pm_prob=fair_pm_prob,
+                edge=edge,
+            )
+            if sent and edge_row_id is not None:
+                # Mark exactly the row we just inserted as alerted.
                 db.table("edges").update({
                     "alerted":    True,
                     "alerted_at": datetime.now(timezone.utc).isoformat(),
-                }).eq("market_id", token_id).gte(
-                    "computed_at",
-                    (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
-                ).execute()
+                }).eq("id", edge_row_id).execute()
                 stats["alerted"] += 1
-            except Exception as e:
-                log.warning("edges.alert_failed", error=str(e))
+            elif not sent:
+                stats["send_failed"] = stats.get("send_failed", 0) + 1
 
     log.info("edges.recompute.done", **stats)
     return stats

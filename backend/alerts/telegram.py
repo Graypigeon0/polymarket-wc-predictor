@@ -31,8 +31,8 @@ async def alert(
     pm_prob: float,
     edge: float,
     driving_news: list[str] | None = None,
-) -> None:
-    """Send a single edge alert."""
+) -> bool:
+    """Send a single edge alert. Returns True if sent successfully."""
     s = get_settings()
     driving = ""
     if driving_news:
@@ -58,8 +58,10 @@ async def alert(
             disable_web_page_preview=True,
         )
         log.info("telegram.alert.sent", market=market_label, edge=edge)
+        return True
     except Exception as e:
         log.error("telegram.alert.failed", error=str(e))
+        return False
 
 
 async def heartbeat() -> None:
