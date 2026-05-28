@@ -156,8 +156,11 @@ COMPETITION_WEIGHTS: dict[str, float] = {
 
 RECENCY_HALF_LIFE_MONTHS = 18.0
 
-# L2 regularization strength (shrinks ratings toward 0)
-REG_LAMBDA = 8.0
+# L2 regularization strength (shrinks ratings toward 0).
+# Lowered from 8.0 to 4.0 once the dataset grew to ~5,600 matches — with
+# more data we need less shrinkage, and heavy shrinkage was over-flattening
+# the favourites (Spain 8% outright vs market 16%).
+REG_LAMBDA = 4.0
 
 # Robust regression parameters
 ROBUST_ITERATIONS = 5            # number of IRLS passes

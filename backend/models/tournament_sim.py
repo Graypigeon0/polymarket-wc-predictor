@@ -97,13 +97,18 @@ def _load_groups_and_ratings() -> tuple[dict[str, list[str]], dict[str, dict]]:
     teams_data = (db.table("teams")
                   .select("id,fifa_code,name,base_attack,base_defense")
                   .execute()).data or []
+    # WC 2026 co-hosts get a home-advantage boost in all their matches.
+    HOST_CODES = {"USA", "MEX", "CAN"}
+
     for t in teams_data:
         if t["id"] in all_teams and t.get("base_attack") is not None:
             ratings[t["id"]] = {
-                "attack":   t["base_attack"],
-                "defense":  t["base_defense"],
-                "name":     t["name"],
+                "attack":    t["base_attack"],
+                "defense":   t["base_defense"],
+                "name":      t["name"],
                 "fifa_code": t["fifa_code"],
+                "home_adv":  t.get("home_adv") or 0.0,
+                "is_host":   t["fifa_code"] in HOST_CODES,
             }
 
     return groups, ratings
@@ -127,8 +132,11 @@ def _sample_from_lambdas(lh, la, np_rng, rho=-0.05, max_goals=8):
 def _knockout_winner(t1, t2, ratings, rng, np_rng):
     """Sample a knockout winner between two team_ids. Returns winning team_id."""
     r1, r2 = ratings[t1], ratings[t2]
-    lh = float(np.exp(r1["attack"] + r2["defense"]))
-    la = float(np.exp(r2["attack"] + r1["defense"]))
+    # Host nations carry their home advantage into every match they play.
+    adv1 = r1.get("home_adv", 0.0) if r1.get("is_host") else 0.0
+    adv2 = r2.get("home_adv", 0.0) if r2.get("is_host") else 0.0
+    lh = float(np.exp(r1["attack"] + r2["defense"] + adv1))
+    la = float(np.exp(r2["attack"] + r1["defense"] + adv2))
     h, a = _sample_from_lambdas(lh, la, np_rng)
     if h > a:
         return t1
@@ -162,8 +170,10 @@ def _simulate_group(team_ids: list[str], ratings: dict, rng, np_rng) -> list[str
         for j in range(i + 1, len(team_ids)):
             t1, t2 = team_ids[i], team_ids[j]
             r1, r2 = ratings[t1], ratings[t2]
-            lh = float(np.exp(r1["attack"] + r2["defense"]))
-            la = float(np.exp(r2["attack"] + r1["defense"]))
+            adv1 = r1.get("home_adv", 0.0) if r1.get("is_host") else 0.0
+            adv2 = r2.get("home_adv", 0.0) if r2.get("is_host") else 0.0
+            lh = float(np.exp(r1["attack"] + r2["defense"] + adv1))
+            la = float(np.exp(r2["attack"] + r1["defense"] + adv2))
             g1, g2 = _sample_from_lambdas(lh, la, np_rng)
             gf[t1] += g1; ga[t1] += g2
             gf[t2] += g2; ga[t2] += g1
