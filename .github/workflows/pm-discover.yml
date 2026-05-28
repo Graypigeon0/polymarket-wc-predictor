@@ -1,15 +1,15 @@
-name: Edge Calculator
+name: Polymarket Discover
 
-# Every 5 minutes: refresh Polymarket prices, recompute edges, fire alerts.
+# Manual one-shot to scan Polymarket and register all WC 2026 markets.
+# Run once after deployment, and again whenever new market types appear
+# (e.g. once knockout-stage matches get listed).
 on:
-  schedule:
-    - cron: "*/5 * * * *"
   workflow_dispatch: {}
 
 jobs:
-  edges:
+  discover:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -18,15 +18,11 @@ jobs:
           cache: pip
       - name: Install
         run: pip install -e .
-      - name: Refresh Polymarket prices + compute edges
+      - name: Scan Polymarket
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          EDGE_ALERT_THRESHOLD: "0.0"
-          EDGE_ALERT_COOLDOWN_MINUTES: "30"
-        run: |
-          python -m backend.main pm-refresh
-          python -m backend.main edges
+        run: python -m backend.main pm-discover

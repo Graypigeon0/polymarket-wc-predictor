@@ -241,5 +241,30 @@ def backfill_martj42(years: int = 5) -> None:
     typer.echo(f"martj42 backfill complete: {n} matches written (last {years} years).")
 
 
+
+@cli.command(name="pm-discover")
+def pm_discover() -> None:
+    """Scan Polymarket and register all active WC 2026 markets in our DB."""
+    from backend.ingestion import polymarket
+    result = asyncio.run(polymarket.discover_wc_markets())
+    typer.echo(f"Discovery result: {result}")
+
+
+@cli.command(name="pm-refresh")
+def pm_refresh() -> None:
+    """Pull latest prices for all tracked Polymarket markets."""
+    from backend.ingestion import polymarket
+    n = asyncio.run(polymarket.refresh_prices())
+    typer.echo(f"Refreshed {n} market prices.")
+
+
+@cli.command(name="edges")
+def edges_cmd() -> None:
+    """Compute edges and fire Telegram alerts where positive."""
+    from backend.edges import calculator
+    stats = asyncio.run(calculator.recompute_all())
+    typer.echo(f"Edges: {stats}")
+
+
 if __name__ == "__main__":
     cli()
