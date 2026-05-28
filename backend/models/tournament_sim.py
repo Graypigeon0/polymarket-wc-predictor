@@ -356,9 +356,16 @@ async def simulate() -> dict[str, Any]:
         if champion:
             win_outright[champion] += 1
 
-    # Persist
+    # Persist (idempotent: clear prior rows for this model_version first so
+    # re-running the sim overwrites instead of duplicating)
     db = get_client()
     n = float(n_runs)
+    try:
+        db.table("tournament_predictions").delete().eq(
+            "model_version", s.model_version).execute()
+    except Exception as e:
+        log.warning("tournament_sim.cleanup_failed", error=str(e)[:200])
+
     written = 0
     for t in all_teams:
         db.table("tournament_predictions").insert({
