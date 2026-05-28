@@ -48,6 +48,19 @@ async def _latest_price(token_id: str, db) -> dict | None:
     return (r.data or [None])[0]
 
 
+async def _tournament_prob(team_id: str, field: str, db) -> float | None:
+    """Fetch a tournament probability (e.g. p_win_outright, p_win_group) for a team."""
+    r = (db.table("tournament_predictions")
+         .select(field)
+         .eq("team_id", team_id)
+         .order("computed_at", desc=True)
+         .limit(1)
+         .execute())
+    if r.data and r.data[0].get(field) is not None:
+        return float(r.data[0][field])
+    return None
+
+
 async def _was_recently_alerted(token_id: str, db, cooldown_min: int) -> bool:
     cutoff = (datetime.now(timezone.utc) - timedelta(minutes=cooldown_min)).isoformat()
     r = (db.table("edges")
@@ -58,6 +71,45 @@ async def _was_recently_alerted(token_id: str, db, cooldown_min: int) -> bool:
          .limit(1)
          .execute())
     return bool(r.data)
+
+
+
+# ---------------------------------------------------------------------
+# Vig / overround handling
+# ---------------------------------------------------------------------
+
+async def _event_overround(market_type: str, db) -> float:
+    """
+    Estimate total implied probability across all 'Yes' tokens of a multi-outcome
+    event (outright winner across 48 teams, or one group's 4 teams).
+
+    Polymarket prices don't sum to 1.0 — the excess is the market's overround
+    (its margin). For outright markets this can be 1.10-1.30. We use it to
+    compute a vig-adjusted 'fair' price so we don't flag the entire overround
+    as fake negative edge.
+
+    Returns the sum of latest prices across active markets of this type.
+    Returns 1.0 if it can't be computed (no adjustment).
+    """
+    markets = (db.table("polymarket_markets")
+               .select("id")
+               .eq("active", True)
+               .eq("market_type", market_type)
+               .execute()).data or []
+    if not markets:
+        return 1.0
+
+    total = 0.0
+    counted = 0
+    for mk in markets:
+        pr = await _latest_price(mk["id"], db)
+        if pr and pr.get("price") is not None:
+            total += float(pr["price"])
+            counted += 1
+    # Only trust the overround if we have most of the field priced
+    if counted < max(2, len(markets) // 2):
+        return 1.0
+    return total if total > 0 else 1.0
 
 
 async def recompute_all() -> dict[str, int]:
@@ -72,11 +124,20 @@ async def recompute_all() -> dict[str, int]:
     markets = (db.table("polymarket_markets")
                .select("id,market_type,description,team_id,outcome_label")
                .eq("active", True)
-               .in_("market_type", ["match_1x2"])
+               .in_("market_type", ["match_1x2", "outright", "group_winner"])
                .execute())
     rows = markets.data or []
 
-    stats = {"considered": len(rows), "edged": 0, "alerted": 0, "no_model": 0, "no_price": 0}
+    stats = {"considered": len(rows), "edged": 0, "alerted": 0,
+             "no_model": 0, "no_price": 0}
+
+    # Precompute overround per multi-outcome market type so we can convert quoted
+    # prices into no-vig "fair" prices for a cleaner edge signal.
+    overrounds = {
+        "outright":     await _event_overround("outright", db),
+        "group_winner": await _event_overround("group_winner", db),
+    }
+    log.info("edges.overrounds", **{k: round(v, 3) for k, v in overrounds.items()})
 
     for m in rows:
         token_id = m["id"]
@@ -88,51 +149,60 @@ async def recompute_all() -> dict[str, int]:
             continue
         pm_prob = float(price_row["price"])
 
-        # 2. Look up matching model prediction
+        # 2. Look up matching model prediction (varies by market type)
         team_id = m.get("team_id")
         if not team_id:
             stats["no_model"] += 1
             continue
 
-        # Find an upcoming match featuring this team. Pick the next one
-        # by kickoff (the market description includes both teams; we use
-        # team_id + nearest fixture as a heuristic mapping).
-        match_q = (db.table("matches")
-                   .select("id,home_id,away_id,kickoff,competition")
-                   .eq("completed", False)
-                   .or_(f"home_id.eq.{team_id},away_id.eq.{team_id}")
-                   .eq("competition", "WC2026")
-                   .order("kickoff")
-                   .limit(1)
-                   .execute())
-        match_rows = match_q.data or []
-        if not match_rows:
+        mtype = m.get("market_type")
+        model_prob = None
+        model_version = "unknown"
+
+        if mtype == "outright":
+            model_prob = await _tournament_prob(team_id, "p_win_outright", db)
+            model_version = "tournament_sim"
+        elif mtype == "group_winner":
+            model_prob = await _tournament_prob(team_id, "p_win_group", db)
+            model_version = "tournament_sim"
+        elif mtype == "match_1x2":
+            match_q = (db.table("matches")
+                       .select("id,home_id,away_id,kickoff,competition")
+                       .eq("completed", False)
+                       .or_(f"home_id.eq.{team_id},away_id.eq.{team_id}")
+                       .eq("competition", "WC2026")
+                       .order("kickoff")
+                       .limit(1)
+                       .execute())
+            match_rows = match_q.data or []
+            if match_rows:
+                match = match_rows[0]
+                pred = await _latest_match_prediction(match["id"], db)
+                if pred:
+                    model_prob = (float(pred["p_home"])
+                                  if match["home_id"] == team_id
+                                  else float(pred["p_away"]))
+                    model_version = pred["model_version"]
+
+        if model_prob is None:
             stats["no_model"] += 1
             continue
-        match = match_rows[0]
 
-        pred = await _latest_match_prediction(match["id"], db)
-        if not pred:
-            stats["no_model"] += 1
-            continue
+        # 3. Compute edge. For multi-outcome markets, convert the quoted price
+        #    to a no-vig "fair" price by dividing by the event overround, so we
+        #    measure true mispricing rather than the market's built-in margin.
+        overround = overrounds.get(mtype, 1.0)
+        fair_pm_prob = pm_prob / overround if overround > 0 else pm_prob
+        edge = model_prob - fair_pm_prob
 
-        # Determine if this team is home or away → pick corresponding model prob
-        if match["home_id"] == team_id:
-            model_prob = float(pred["p_home"])
-        else:
-            model_prob = float(pred["p_away"])
-
-        # 3. Compute edge
-        edge = model_prob - pm_prob
-
-        # 4. Always log it
+        # 4. Always log it (store the fair price as pm_prob, raw kept in note)
         db.table("edges").insert({
             "market_id":     token_id,
             "model_prob":    model_prob,
-            "pm_prob":       pm_prob,
+            "pm_prob":       fair_pm_prob,
             "edge":          edge,
-            "edge_lower_ci": edge - 0.05,  # placeholder ±5pp band
-            "model_version": pred["model_version"],
+            "edge_lower_ci": edge - 0.05,
+            "model_version": model_version,
             "alerted":       False,
         }).execute()
 
@@ -147,7 +217,7 @@ async def recompute_all() -> dict[str, int]:
                     market_label=label,
                     market_url=polymarket_url,
                     model_prob=model_prob,
-                    pm_prob=pm_prob,
+                    pm_prob=fair_pm_prob,
                     edge=edge,
                 )
                 # Mark alerted

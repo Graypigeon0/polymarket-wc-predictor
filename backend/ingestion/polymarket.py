@@ -119,127 +119,133 @@ async def _lookup_team_id(name: str) -> str | None:
 
 async def discover_wc_markets() -> dict[str, int]:
     """
-    Find all active WC 2026 markets on Polymarket and upsert into the DB.
-    Returns counts by market_type.
+    Find all active WC 2026 markets on Polymarket via the /events endpoint and
+    upsert into polymarket_markets. Returns counts by market_type.
+
+    Polymarket groups related markets into "events". A World Cup winner event
+    contains ~48 sub-markets, one per team, each a binary Yes/No with the team
+    name in `groupItemTitle`. We classify the EVENT (outright / group_winner /
+    top_scorer) then attach each sub-market's team.
     """
     log.info("polymarket.discover.start")
     counts: dict[str, int] = {}
     db = get_client()
 
+    # WC 2026 event slugs we care about. Gamma supports tag/slug search; we
+    # query broadly then filter by title keywords.
     async with httpx.AsyncClient() as client:
-        # Strategy: paginate /markets with active=true and filter by tag/question
-        # Gamma supports up to 500 markets per page.
-        offset = 0
-        page_size = 500
-        seen = 0
-        matched = 0
+        events = await _find_wc_events(client)
+        log.info("polymarket.discover.events_found", n=len(events))
 
-        while True:
-            try:
-                params = {
-                    "active": "true",
-                    "closed": "false",
-                    "archived": "false",
-                    "limit": str(page_size),
-                    "offset": str(offset),
-                }
-                data = await _gamma_get(client, "/markets", params=params)
-            except Exception as e:
-                log.error("polymarket.gamma_failed", error=str(e))
-                break
+        for ev in events:
+            ev_title = (ev.get("title") or "").lower()
+            ev_slug = (ev.get("slug") or "").lower()
+            market_type = _classify_event(ev_title, ev_slug)
 
-            markets = data if isinstance(data, list) else data.get("data", [])
-            if not markets:
-                break
-            seen += len(markets)
-
-            for m in markets:
-                question = m.get("question", "")
-                slug = m.get("slug", "")
-                tags = m.get("tags") or []
-                text = (question + " " + slug + " " + " ".join(tags)).lower()
-
-                # Filter to WC 2026 only
-                if not any(k in text for k in WC_KEYWORDS):
+            for m in ev.get("markets", []):
+                if m.get("closed") or m.get("archived"):
+                    continue
+                token_ids = _parse_json_field(m.get("clobTokenIds"))
+                outcomes = _parse_json_field(m.get("outcomes")) or ["Yes", "No"]
+                if not token_ids:
                     continue
 
-                condition_id = m.get("conditionId") or m.get("condition_id")
-                clob_token_ids = m.get("clobTokenIds") or m.get("clob_token_ids") or []
-                if isinstance(clob_token_ids, str):
-                    # Sometimes returned as JSON string
-                    import json as _json
-                    try:
-                        clob_token_ids = _json.loads(clob_token_ids)
-                    except Exception:
-                        clob_token_ids = []
-                if not condition_id or not clob_token_ids:
-                    continue
+                # Team name: neg-risk events put it in groupItemTitle
+                team_name = (m.get("groupItemTitle") or "").strip()
+                if not team_name:
+                    # Fall back to extracting from the question
+                    names = _extract_teams(m.get("question", ""))
+                    team_name = names[0] if names else ""
 
-                market_type = _classify_market(question, slug)
+                team_id = await _lookup_team_id(team_name) if team_name else None
                 counts[market_type] = counts.get(market_type, 0) + 1
 
-                # Try to extract team(s) for matching to internal data
-                team_ids: list[str | None] = []
-                if market_type in ("match_1x2", "outright", "group_winner",
-                                   "stage_advance"):
-                    names = _extract_teams(question)
-                    # Also check for outright "Brazil to win" format
-                    if not names:
-                        m2 = re.search(r"([A-Z][a-zA-Z\s]+?)\s+to win",
-                                       question or "")
-                        if m2:
-                            names = [m2.group(1).strip()]
-                    for n in names[:2]:
-                        team_ids.append(await _lookup_team_id(n))
+                # For binary team markets we track the "Yes" token (index 0).
+                yes_token = str(token_ids[0])
+                label_team = team_name or m.get("question", "")[:40]
+                db.table("polymarket_markets").upsert({
+                    "id":            yes_token,
+                    "market_type":   market_type,
+                    "description":   m.get("question") or ev.get("title"),
+                    "outcome_label": f"{ev.get('title', '')} — {label_team}",
+                    "team_id":       team_id,
+                    "active":        True,
+                }, on_conflict="id").execute()
 
-                # Each market has 2 outcome tokens (typically Yes/No). For binary
-                # win markets, we just track the "Yes" token (index 0).
-                outcomes = m.get("outcomes") or ["Yes", "No"]
-                if isinstance(outcomes, str):
-                    import json as _json
-                    try:
-                        outcomes = _json.loads(outcomes)
-                    except Exception:
-                        outcomes = ["Yes", "No"]
-
-                for idx, token_id in enumerate(clob_token_ids[:2]):
-                    if not token_id:
-                        continue
-                    label = outcomes[idx] if idx < len(outcomes) else f"Outcome {idx}"
-
-                    row = {
-                        "id":            str(token_id),
-                        "market_type":   market_type,
-                        "description":   question,
-                        "outcome_label": f"{question} — {label}",
-                        "active":        True,
-                    }
-                    # Attach team_id when we extracted one
-                    if team_ids:
-                        if market_type == "match_1x2" and len(team_ids) >= 2:
-                            # idx 0 = first team wins; idx 1 = second team wins
-                            row["team_id"] = team_ids[idx] if idx < len(team_ids) else None
-                        elif market_type in ("outright", "group_winner",
-                                             "stage_advance"):
-                            # "Brazil to win" — same team on both Yes/No tokens
-                            row["team_id"] = team_ids[0]
-
-                    db.table("polymarket_markets").upsert(
-                        row, on_conflict="id").execute()
-                    matched += 1
-
-            if len(markets) < page_size:
-                break
-            offset += page_size
-
-    log.info("polymarket.discover.done",
-             total_scanned=seen, wc_matched=matched, by_type=counts)
+    log.info("polymarket.discover.done", by_type=counts,
+             total=sum(counts.values()))
     return counts
 
 
-# ---------------------------------------------------------------------
-# Price refresh
-# ---------------------------------------------------------------------
+async def _find_wc_events(client: httpx.AsyncClient) -> list[dict]:
+    """Search Gamma /events for active World Cup 2026 events (paginated)."""
+    found: list[dict] = []
+    seen_ids: set = set()
+    offset = 0
+    page_size = 100
+
+    while True:
+        try:
+            data = await _gamma_get(client, "/events", params={
+                "active": "true",
+                "closed": "false",
+                "archived": "false",
+                "limit": str(page_size),
+                "offset": str(offset),
+            })
+        except Exception as e:
+            log.error("polymarket.events_failed", error=str(e), offset=offset)
+            break
+
+        events = data if isinstance(data, list) else data.get("data", [])
+        if not events:
+            break
+
+        for ev in events:
+            text = ((ev.get("title") or "") + " " + (ev.get("slug") or "")).lower()
+            if any(k in text for k in WC_KEYWORDS):
+                if ev.get("id") not in seen_ids:
+                    seen_ids.add(ev.get("id"))
+                    found.append(ev)
+
+        if len(events) < page_size:
+            break
+        offset += page_size
+        if offset > 5000:   # safety cap
+            break
+
+    return found
+
+
+def _classify_event(title: str, slug: str) -> str:
+    """Classify a Polymarket EVENT (not individual market) by title/slug."""
+    text = f"{title} {slug}".lower()
+    if "top scorer" in text or "golden boot" in text:
+        return "top_scorer"
+    if "win group" in text or "group" in text and "winner" in text:
+        return "group_winner"
+    if any(k in text for k in ["winner", "win the", "to win", "champion"]):
+        return "outright"
+    if "reach" in text or "advance" in text or "make the" in text:
+        return "stage_advance"
+    return "other"
+
+
+def _parse_json_field(val) -> list:
+    """Gamma sometimes returns arrays as JSON strings. Parse defensively."""
+    if val is None:
+        return []
+    if isinstance(val, list):
+        return val
+    if isinstance(val, str):
+        import json as _json
+        try:
+            parsed = _json.loads(val)
+            return parsed if isinstance(parsed, list) else []
+        except Exception:
+            return []
+    return []
+
 
 async def refresh_prices() -> int:
     """Pull latest midpoint+book for every active polymarket_markets row."""
