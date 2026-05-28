@@ -31,7 +31,6 @@ from typing import Any
 import numpy as np
 import structlog
 from scipy.optimize import minimize
-from scipy.stats import poisson
 
 from backend.config import get_settings
 from backend.db.client import get_client
@@ -69,15 +68,28 @@ def _tau(x: int, y: int, lh: float, la: float, rho: float) -> float:
     return 1.0
 
 
+# Precomputed factorials for fast Poisson PMF (max 8 goals + headroom)
+_FACTORIAL = np.array([math.factorial(k) for k in range(13)], dtype=float)
+
+
+def _poisson_pmf_vec(lam: float, max_goals: int) -> np.ndarray:
+    """Vectorized Poisson PMF for k = 0..max_goals. Much faster than scipy."""
+    k = np.arange(max_goals + 1)
+    return np.exp(-lam) * np.power(lam, k) / _FACTORIAL[:max_goals + 1]
+
+
 def score_grid(lh: float, la: float, rho: float, max_goals: int = 8) -> np.ndarray:
-    grid = np.zeros((max_goals + 1, max_goals + 1))
-    for x in range(max_goals + 1):
-        for y in range(max_goals + 1):
-            grid[x, y] = (
-                _tau(x, y, lh, la, rho)
-                * poisson.pmf(x, lh)
-                * poisson.pmf(y, la)
-            )
+    """Joint scoreline probability matrix under Dixon-Coles. Vectorized."""
+    ph = _poisson_pmf_vec(lh, max_goals)
+    pa = _poisson_pmf_vec(la, max_goals)
+    grid = np.outer(ph, pa)
+
+    # Dixon-Coles low-score corrections (only the 2x2 corner is adjusted)
+    grid[0, 0] *= 1.0 - lh * la * rho
+    grid[0, 1] *= 1.0 + lh * rho
+    grid[1, 0] *= 1.0 + la * rho
+    grid[1, 1] *= 1.0 - rho
+
     s = grid.sum()
     if s > 0:
         grid /= s

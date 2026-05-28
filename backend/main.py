@@ -266,5 +266,14 @@ def edges_cmd() -> None:
     typer.echo(f"Edges: {stats}")
 
 
+
+@cli.command(name="sim")
+def sim() -> None:
+    """Run the Monte Carlo tournament simulation; persist outright/group probs."""
+    from backend.models import tournament_sim
+    result = asyncio.run(tournament_sim.simulate())
+    typer.echo(f"Tournament sim: {result}")
+
+
 if __name__ == "__main__":
     cli()

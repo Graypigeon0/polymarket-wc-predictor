@@ -1,29 +1,30 @@
 name: Tournament Sim
 
-# Runs the full Monte Carlo tournament sim + top scorer model once daily at 3am UTC
-# Takes longer so runs infrequently — results cached in Supabase
+# Daily Monte Carlo tournament simulation → outright + group-winner probabilities.
+# Also runnable manually. ~1 min for 10k simulations.
 on:
   schedule:
-    - cron: "0 3 * * *"
+    - cron: "0 4 * * *"   # daily 4am UTC, after the 3am model refit
   workflow_dispatch: {}
 
 jobs:
   simulate:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip
-      - name: Install dependencies
+      - name: Install
         run: pip install -e .
-      - name: Run tournament sim + top scorer model
+      - name: Run tournament simulation
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python -m backend.main once sim
+          MONTE_CARLO_RUNS: "10000"
+        run: python -m backend.main sim
