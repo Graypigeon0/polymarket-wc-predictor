@@ -78,38 +78,69 @@ async def _was_recently_alerted(token_id: str, db, cooldown_min: int) -> bool:
 # Vig / overround handling
 # ---------------------------------------------------------------------
 
-async def _event_overround(market_type: str, db) -> float:
+import re as _re
+
+
+def _group_of(label: str) -> str | None:
+    """Parse the group letter from a market label like '... Group H Winner ...'."""
+    m = _re.search(r"group\s+([A-L])\b", label or "", _re.IGNORECASE)
+    return m.group(1).upper() if m else None
+
+
+async def _compute_overrounds(db) -> dict[str, Any]:
     """
-    Estimate total implied probability across all 'Yes' tokens of a multi-outcome
-    event (outright winner across 48 teams, or one group's 4 teams).
+    Compute market overrounds (sum of Yes prices) for normalization.
 
-    Polymarket prices don't sum to 1.0 — the excess is the market's overround
-    (its margin). For outright markets this can be 1.10-1.30. We use it to
-    compute a vig-adjusted 'fair' price so we don't flag the entire overround
-    as fake negative edge.
+    Returns:
+      {
+        "outright": float,                  # sum across all 48 outright markets
+        "group_winner": {group_letter: float},  # per-group sum of 4 teams
+      }
 
-    Returns the sum of latest prices across active markets of this type.
-    Returns 1.0 if it can't be computed (no adjustment).
+    Polymarket Yes-prices don't sum to 1.0 — the excess is the market's margin.
+    For outright, all 48 teams form one market (sum ~1.1-1.3). For group winner,
+    each group's 4 teams form a separate market (sum ~1.05-1.15) — so the
+    overround MUST be computed per-group, not across all groups.
     """
-    markets = (db.table("polymarket_markets")
-               .select("id")
-               .eq("active", True)
-               .eq("market_type", market_type)
-               .execute()).data or []
-    if not markets:
-        return 1.0
+    result: dict[str, Any] = {"outright": 1.0, "group_winner": {}}
 
+    # Outright: one big market
+    outright = (db.table("polymarket_markets")
+                .select("id")
+                .eq("active", True)
+                .eq("market_type", "outright")
+                .execute()).data or []
     total = 0.0
     counted = 0
-    for mk in markets:
+    for mk in outright:
         pr = await _latest_price(mk["id"], db)
         if pr and pr.get("price") is not None:
-            total += float(pr["price"])
-            counted += 1
-    # Only trust the overround if we have most of the field priced
-    if counted < max(2, len(markets) // 2):
-        return 1.0
-    return total if total > 0 else 1.0
+            total += float(pr["price"]); counted += 1
+    if counted >= max(2, len(outright) // 2) and total > 0:
+        result["outright"] = total
+
+    # Group winner: per-group sums
+    gw = (db.table("polymarket_markets")
+          .select("id,outcome_label,description")
+          .eq("active", True)
+          .eq("market_type", "group_winner")
+          .execute()).data or []
+    group_totals: dict[str, float] = {}
+    group_counts: dict[str, int] = {}
+    for mk in gw:
+        grp = _group_of(mk.get("outcome_label") or mk.get("description") or "")
+        if not grp:
+            continue
+        pr = await _latest_price(mk["id"], db)
+        if pr and pr.get("price") is not None:
+            group_totals[grp] = group_totals.get(grp, 0.0) + float(pr["price"])
+            group_counts[grp] = group_counts.get(grp, 0) + 1
+    for grp, tot in group_totals.items():
+        # Only trust if we priced at least 2 of the group's teams
+        if group_counts.get(grp, 0) >= 2 and tot > 0:
+            result["group_winner"][grp] = tot
+
+    return result
 
 
 async def recompute_all() -> dict[str, int]:
@@ -131,13 +162,11 @@ async def recompute_all() -> dict[str, int]:
     stats = {"considered": len(rows), "edged": 0, "alerted": 0,
              "no_model": 0, "no_price": 0}
 
-    # Precompute overround per multi-outcome market type so we can convert quoted
-    # prices into no-vig "fair" prices for a cleaner edge signal.
-    overrounds = {
-        "outright":     await _event_overround("outright", db),
-        "group_winner": await _event_overround("group_winner", db),
-    }
-    log.info("edges.overrounds", **{k: round(v, 3) for k, v in overrounds.items()})
+    # Precompute overrounds (outright = one market; group_winner = per-group)
+    overrounds = await _compute_overrounds(db)
+    log.info("edges.overrounds",
+             outright=round(overrounds["outright"], 3),
+             groups={g: round(v, 3) for g, v in overrounds["group_winner"].items()})
 
     for m in rows:
         token_id = m["id"]
@@ -191,7 +220,13 @@ async def recompute_all() -> dict[str, int]:
         # 3. Compute edge. For multi-outcome markets, convert the quoted price
         #    to a no-vig "fair" price by dividing by the event overround, so we
         #    measure true mispricing rather than the market's built-in margin.
-        overround = overrounds.get(mtype, 1.0)
+        if mtype == "outright":
+            overround = overrounds["outright"]
+        elif mtype == "group_winner":
+            grp = _group_of(m.get("outcome_label") or m.get("description") or "")
+            overround = overrounds["group_winner"].get(grp, 1.0)
+        else:
+            overround = 1.0
         fair_pm_prob = pm_prob / overround if overround > 0 else pm_prob
         edge = model_prob - fair_pm_prob
 
