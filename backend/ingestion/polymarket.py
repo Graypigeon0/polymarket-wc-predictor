@@ -248,62 +248,87 @@ def _parse_json_field(val) -> list:
 
 
 async def refresh_prices() -> int:
-    """Pull latest midpoint+book for every active polymarket_markets row."""
+    """
+    Pull latest prices for all tracked WC markets via the Gamma API.
+
+    We re-scan the WC events (same path used for discovery, known reachable from
+    CI) and read each market's current price directly from the Gamma market
+    object — `bestBid`/`bestAsk` midpoint, falling back to `outcomePrices[0]`
+    (the Yes price) or `lastTradePrice`. This avoids the CLOB /book endpoint,
+    which is geo/IP-restricted and unreachable from GitHub Actions runners.
+    """
     log.info("polymarket.refresh_prices.start")
     db = get_client()
 
-    markets = (db.table("polymarket_markets")
+    # Which token_ids are we tracking?
+    tracked = (db.table("polymarket_markets")
                .select("id")
                .eq("active", True)
-               .execute())
-    market_ids = [r["id"] for r in (markets.data or [])]
-    if not market_ids:
+               .execute()).data or []
+    tracked_ids = {r["id"] for r in tracked}
+    if not tracked_ids:
         log.info("polymarket.refresh_prices.no_markets")
         return 0
 
     written = 0
     async with httpx.AsyncClient() as client:
-        for token_id in market_ids:
-            try:
-                # Use /midpoint for speed (one request gives midpoint + best bid/ask)
-                book = await _clob_get(client, "/book", params={"token_id": token_id})
-                bids = book.get("bids") or []
-                asks = book.get("asks") or []
-                best_bid = float(bids[0]["price"]) if bids else None
-                best_ask = float(asks[0]["price"]) if asks else None
+        events = await _find_wc_events(client)
+        for ev in events:
+            for m in ev.get("markets", []):
+                token_ids = _parse_json_field(m.get("clobTokenIds"))
+                if not token_ids:
+                    continue
+                yes_token = str(token_ids[0])
+                if yes_token not in tracked_ids:
+                    continue
 
-                if best_bid is not None and best_ask is not None:
-                    price = (best_bid + best_ask) / 2.0
-                elif best_bid is not None:
-                    price = best_bid
-                elif best_ask is not None:
-                    price = best_ask
-                else:
-                    continue  # no liquidity, skip
+                price = _extract_price(m)
+                if price is None:
+                    continue
 
-                # Rough order-book depth within 1pp of midpoint
-                depth = 0.0
-                for side in (bids, asks):
-                    for level in side:
-                        try:
-                            p = float(level["price"])
-                            sz = float(level.get("size", 0))
-                            if abs(p - price) <= 0.01:
-                                depth += sz * p
-                        except (KeyError, TypeError, ValueError):
-                            continue
+                best_bid = _safe_float(m.get("bestBid"))
+                best_ask = _safe_float(m.get("bestAsk"))
+                # Liquidity proxy from Gamma
+                depth = _safe_float(m.get("liquidityNum")) or _safe_float(m.get("liquidity")) or 0.0
 
                 db.table("polymarket_prices").insert({
-                    "market_id":  token_id,
+                    "market_id":  yes_token,
                     "price":      price,
                     "bid":        best_bid,
                     "ask":        best_ask,
                     "book_depth": depth,
                 }).execute()
                 written += 1
-            except Exception as e:
-                log.warning("polymarket.price_failed",
-                            token_id=token_id[:16] + "...", error=str(e)[:200])
 
-    log.info("polymarket.refresh_prices.done", written=written)
+    log.info("polymarket.refresh_prices.done", written=written,
+             tracked=len(tracked_ids))
     return written
+
+
+def _safe_float(val) -> float | None:
+    try:
+        if val is None or val == "":
+            return None
+        return float(val)
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_price(market: dict) -> float | None:
+    """Get the current Yes-price for a Gamma market object."""
+    # 1. Midpoint of best bid/ask if both present
+    bid = _safe_float(market.get("bestBid"))
+    ask = _safe_float(market.get("bestAsk"))
+    if bid is not None and ask is not None and 0 < bid <= ask <= 1:
+        return (bid + ask) / 2.0
+    # 2. outcomePrices[0] (the Yes price)
+    prices = _parse_json_field(market.get("outcomePrices"))
+    if prices:
+        p = _safe_float(prices[0])
+        if p is not None and 0 <= p <= 1:
+            return p
+    # 3. last trade
+    ltp = _safe_float(market.get("lastTradePrice"))
+    if ltp is not None and 0 <= ltp <= 1:
+        return ltp
+    return None
