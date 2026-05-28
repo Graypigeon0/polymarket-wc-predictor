@@ -162,6 +162,13 @@ RECENCY_HALF_LIFE_MONTHS = 18.0
 # the favourites (Spain 8% outright vs market 16%).
 REG_LAMBDA = 4.0
 
+# FIFA-ranking prior. We shrink each team's rating toward a baseline implied by
+# its FIFA ranking points (read from teams.fifa_points), instead of toward the
+# global average (0). This stops data-sparse minnows (Haiti, Curacao, etc.) from
+# being pulled UP to "average" — they shrink toward "weak" where they belong.
+FIFA_AVG_POINTS = 1500.0    # FIFA points that map to prior net rating 0
+PRIOR_SCALE = 500.0         # FIFA points per 1.0 net-rating unit
+
 # Robust regression parameters
 ROBUST_ITERATIONS = 5            # number of IRLS passes
 TUKEY_C = 4.0                    # bisquare cutoff; smaller = more aggressive downweighting
@@ -227,6 +234,8 @@ def _neg_log_likelihood(
     team_idx: dict[str, int],
     n_teams: int,
     match_weights: np.ndarray,
+    prior_attack: np.ndarray,
+    prior_defense: np.ndarray,
 ) -> float:
     attacks = params[:n_teams]
     defenses = params[n_teams:2 * n_teams]
@@ -257,8 +266,11 @@ def _neg_log_likelihood(
 
         total -= w * log_p
 
-    # L2 regularization (shrinkage toward 0)
-    reg = REG_LAMBDA * float(np.sum(attacks ** 2) + np.sum(defenses ** 2))
+    # L2 regularization — shrink toward the FIFA-ranking prior (not toward 0).
+    reg = REG_LAMBDA * float(
+        np.sum((attacks - prior_attack) ** 2)
+        + np.sum((defenses - prior_defense) ** 2)
+    )
     return total + reg
 
 
@@ -308,7 +320,48 @@ def _tukey_weights(residuals: np.ndarray, c: float = TUKEY_C) -> np.ndarray:
 # Fitting (robust IRLS)
 # ---------------------------------------------------------------------
 
-def _fit_core(matches: list[dict], as_of_date: datetime) -> dict[str, Any]:
+def _load_team_priors() -> dict[str, float]:
+    """
+    Return {team_id: prior_net_rating} from teams.fifa_points.
+    Teams without a stored FIFA points value default to 0 (average).
+    """
+    db = get_client()
+    priors: dict[str, float] = {}
+    # Paginate teams (could be 150+)
+    offset = 0
+    while True:
+        r = (db.table("teams")
+             .select("id,fifa_points")
+             .range(offset, offset + 999)
+             .execute())
+        rows = r.data or []
+        for t in rows:
+            pts = t.get("fifa_points")
+            if pts is not None:
+                priors[t["id"]] = (float(pts) - FIFA_AVG_POINTS) / PRIOR_SCALE
+        if len(rows) < 1000:
+            break
+        offset += 1000
+    return priors
+
+
+def _build_prior_arrays(team_idx: dict[str, int],
+                        prior_net_by_id: dict[str, float]
+                        ) -> tuple[np.ndarray, np.ndarray]:
+    """Build prior_attack / prior_defense arrays aligned with team_idx."""
+    n = len(team_idx)
+    prior_attack = np.zeros(n)
+    prior_defense = np.zeros(n)
+    for team_id, i in team_idx.items():
+        net = prior_net_by_id.get(team_id, 0.0)
+        # Split net into symmetric attack (+) and defense (-) components
+        prior_attack[i] = net / 2.0
+        prior_defense[i] = -net / 2.0
+    return prior_attack, prior_defense
+
+
+def _fit_core(matches: list[dict], as_of_date: datetime,
+              prior_net_by_id: dict[str, float] | None = None) -> dict[str, Any]:
     """
     Core robust-IRLS fit. Returns fitted parameters in memory (no DB writes).
 
@@ -317,6 +370,10 @@ def _fit_core(matches: list[dict], as_of_date: datetime) -> dict[str, Any]:
     team_idx = _build_team_index(matches)
     n_teams = len(team_idx)
     n_matches = len(matches)
+
+    # FIFA-ranking priors (shrinkage targets), aligned with team_idx
+    prior_attack, prior_defense = _build_prior_arrays(
+        team_idx, prior_net_by_id or {})
 
     # Static weights (recency + competition)
     base_weights = np.zeros(n_matches)
@@ -341,7 +398,7 @@ def _fit_core(matches: list[dict], as_of_date: datetime) -> dict[str, Any]:
         ftol = 1e-4 if iteration < ROBUST_ITERATIONS - 1 else 1e-6
         result = minimize(
             _neg_log_likelihood, params,
-            args=(matches, team_idx, n_teams, weights),
+            args=(matches, team_idx, n_teams, weights, prior_attack, prior_defense),
             method="SLSQP", bounds=bounds, constraints=[constraint],
             options={"maxiter": 200, "ftol": ftol},
         )
@@ -381,7 +438,9 @@ async def fit() -> dict[str, Any]:
         return {"error": "not enough matches", "n": len(matches)}
 
     log.info("dixon_coles.fit.data", n_matches=len(matches))
-    fitted = _fit_core(matches, datetime.now(timezone.utc))
+    prior_net = _load_team_priors()
+    log.info("dixon_coles.fit.priors_loaded", n_with_prior=len(prior_net))
+    fitted = _fit_core(matches, datetime.now(timezone.utc), prior_net)
 
     # Persist ratings back to Supabase
     db = get_client()
