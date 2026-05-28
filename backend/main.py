@@ -275,5 +275,15 @@ def sim() -> None:
     typer.echo(f"Tournament sim: {result}")
 
 
+
+@cli.command()
+def backtest(target: str = "EURO2024") -> None:
+    """Backtest model calibration on a past tournament (EURO2024, WC2022, COPA2024)."""
+    from backend.models import backtest as bt
+    result = asyncio.run(bt.run_backtest(target))
+    import json
+    typer.echo(json.dumps(result, indent=2))
+
+
 if __name__ == "__main__":
     cli()

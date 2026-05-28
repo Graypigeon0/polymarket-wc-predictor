@@ -177,24 +177,38 @@ def _recency_weight(match_date: datetime, ref_date: datetime) -> float:
     return 0.5 ** (max(0.0, months_old) / RECENCY_HALF_LIFE_MONTHS)
 
 
-def _load_training_matches() -> list[dict[str, Any]]:
+def _load_training_matches(as_of: str | None = None,
+                           exclude_competitions: tuple[str, ...] = ("WC2026",)
+                           ) -> list[dict[str, Any]]:
+    """
+    Load completed matches for fitting.
+
+    as_of: ISO date string. If provided, only matches with kickoff strictly
+           before this date are returned (used for backtesting — no lookahead).
+    exclude_competitions: competitions to drop entirely (e.g. the target
+           tournament during a backtest, plus the live WC2026 fixtures).
+    """
     db = get_client()
-    # Paginate — Supabase default limit is 1000 rows per query.
     all_rows: list[dict[str, Any]] = []
     page_size = 1000
     offset = 0
     while True:
-        r = (db.table("matches")
+        q = (db.table("matches")
              .select("home_id,away_id,kickoff,home_goals,away_goals,competition")
-             .eq("completed", True)
-             .neq("competition", "WC2026")
-             .range(offset, offset + page_size - 1)
-             .execute())
+             .eq("completed", True))
+        if as_of:
+            q = q.lt("kickoff", as_of)
+        q = q.range(offset, offset + page_size - 1)
+        r = q.execute()
         rows = r.data or []
         all_rows.extend(rows)
         if len(rows) < page_size:
             break
         offset += page_size
+
+    if exclude_competitions:
+        excl = set(exclude_competitions)
+        all_rows = [m for m in all_rows if m["competition"] not in excl]
     return all_rows
 
 
@@ -294,29 +308,24 @@ def _tukey_weights(residuals: np.ndarray, c: float = TUKEY_C) -> np.ndarray:
 # Fitting (robust IRLS)
 # ---------------------------------------------------------------------
 
-async def fit() -> dict[str, Any]:
-    """Fit Dixon-Coles ratings with robust iteratively reweighted MLE."""
-    log.info("dixon_coles.fit.start")
-    matches = _load_training_matches()
-    if len(matches) < 50:
-        log.error("dixon_coles.fit.too_few_matches", n=len(matches))
-        return {"error": "not enough matches", "n": len(matches)}
+def _fit_core(matches: list[dict], as_of_date: datetime) -> dict[str, Any]:
+    """
+    Core robust-IRLS fit. Returns fitted parameters in memory (no DB writes).
 
+    Returns dict with: team_idx, attacks, defenses, home_adv, rho, nll_history.
+    """
     team_idx = _build_team_index(matches)
     n_teams = len(team_idx)
     n_matches = len(matches)
-    log.info("dixon_coles.fit.data", n_matches=n_matches, n_teams=n_teams)
 
-    # Pre-compute static weights (recency + competition)
-    ref_date = datetime.now(timezone.utc)
+    # Static weights (recency + competition)
     base_weights = np.zeros(n_matches)
     for k, m in enumerate(matches):
         kickoff = datetime.fromisoformat(m["kickoff"].replace("Z", "+00:00"))
-        wr = _recency_weight(kickoff, ref_date)
+        wr = _recency_weight(kickoff, as_of_date)
         wc = COMPETITION_WEIGHTS.get(m["competition"], 0.4)
         base_weights[k] = wr * wc
 
-    # Initial params: zeros + home_adv 0.1, rho -0.05
     x0 = np.zeros(2 * n_teams + 2)
     x0[-2] = 0.1
     x0[-1] = -0.05
@@ -329,46 +338,56 @@ async def fit() -> dict[str, Any]:
     weights = base_weights.copy()
 
     for iteration in range(ROBUST_ITERATIONS):
-        # Looser tolerance for early iterations (we'll refine later)
         ftol = 1e-4 if iteration < ROBUST_ITERATIONS - 1 else 1e-6
-
         result = minimize(
-            _neg_log_likelihood,
-            params,
+            _neg_log_likelihood, params,
             args=(matches, team_idx, n_teams, weights),
-            method="SLSQP",
-            bounds=bounds,
-            constraints=[constraint],
+            method="SLSQP", bounds=bounds, constraints=[constraint],
             options={"maxiter": 200, "ftol": ftol},
         )
         params = result.x
         nll_history.append(float(result.fun))
 
-        # Compute robust weights based on current fit
         resid = _pearson_residuals(params, matches, team_idx, n_teams)
         robust_w = _tukey_weights(resid)
         new_weights = base_weights * robust_w
-
-        # Check convergence: how much did weights change?
         weight_change = float(np.abs(new_weights - weights).sum() / weights.sum())
-        log.info("dixon_coles.fit.iteration",
-                 iter=iteration + 1,
+        log.info("dixon_coles.fit.iteration", iter=iteration + 1,
                  nll=nll_history[-1],
                  downweighted=int((robust_w < 0.5).sum()),
                  weight_change=weight_change)
-
         weights = new_weights
         if weight_change < 0.01:
-            log.info("dixon_coles.fit.converged", iter=iteration + 1)
             break
 
-    attacks = params[:n_teams]
-    defenses = params[n_teams:2 * n_teams]
-    home_adv = float(params[-2])
-    rho = float(params[-1])
+    return {
+        "team_idx":    team_idx,
+        "attacks":     params[:n_teams],
+        "defenses":    params[n_teams:2 * n_teams],
+        "home_adv":    float(params[-2]),
+        "rho":         float(params[-1]),
+        "nll_history": nll_history,
+        "n_teams":     n_teams,
+        "n_matches":   n_matches,
+    }
+
+
+async def fit() -> dict[str, Any]:
+    """Fit Dixon-Coles ratings with robust IRLS and persist to the teams table."""
+    log.info("dixon_coles.fit.start")
+    matches = _load_training_matches()
+    if len(matches) < 50:
+        log.error("dixon_coles.fit.too_few_matches", n=len(matches))
+        return {"error": "not enough matches", "n": len(matches)}
+
+    log.info("dixon_coles.fit.data", n_matches=len(matches))
+    fitted = _fit_core(matches, datetime.now(timezone.utc))
 
     # Persist ratings back to Supabase
     db = get_client()
+    team_idx = fitted["team_idx"]
+    attacks, defenses = fitted["attacks"], fitted["defenses"]
+    home_adv = fitted["home_adv"]
     updated = 0
     for team_id, idx in team_idx.items():
         db.table("teams").update({
@@ -379,25 +398,19 @@ async def fit() -> dict[str, Any]:
         updated += 1
 
     log.info("dixon_coles.fit.done",
-             n_teams=n_teams, n_matches=n_matches,
-             home_adv=home_adv, rho=rho,
-             updated=updated, nll=nll_history[-1],
-             iterations=len(nll_history))
+             n_teams=fitted["n_teams"], n_matches=fitted["n_matches"],
+             home_adv=home_adv, rho=fitted["rho"],
+             updated=updated, nll=fitted["nll_history"][-1],
+             iterations=len(fitted["nll_history"]))
 
     return {
-        "n_teams":      n_teams,
-        "n_matches":    n_matches,
-        "home_adv":     home_adv,
-        "rho":          rho,
-        "nll":          nll_history[-1],
-        "iterations":   len(nll_history),
-        "nll_history":  nll_history,
+        "n_teams":     fitted["n_teams"],
+        "n_matches":   fitted["n_matches"],
+        "home_adv":    home_adv,
+        "rho":         fitted["rho"],
+        "nll":         fitted["nll_history"][-1],
+        "iterations":  len(fitted["nll_history"]),
     }
-
-
-# ---------------------------------------------------------------------
-# Prediction
-# ---------------------------------------------------------------------
 
 async def predict_upcoming() -> int:
     """Generate match_predictions rows for every uncompleted match."""

@@ -1,0 +1,38 @@
+name: Backtest
+
+# Validate model calibration against a past tournament.
+# Manual trigger. Fits as-of the tournament date (no lookahead) and scores
+# predictions vs actual results.
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Tournament to backtest against'
+        required: false
+        default: 'EURO2024'
+        type: choice
+        options:
+          - 'EURO2024'
+          - 'WC2022'
+          - 'COPA2024'
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install
+        run: pip install -e .
+      - name: Run backtest
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python -m backend.main backtest --target ${{ inputs.target }}
