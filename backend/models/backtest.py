@@ -84,7 +84,8 @@ async def run_backtest(target: str = "EURO2024") -> dict[str, Any]:
 
     # 2. Fit in-memory (no DB writes), shrinking toward FIFA-ranking priors
     prior_net = dixon_coles._load_team_priors()
-    fitted = dixon_coles._fit_core(matches, as_of_dt, prior_net)
+    fifa_pts = dixon_coles._load_team_fifa_points()
+    fitted = dixon_coles._fit_core(matches, as_of_dt, prior_net, fifa_pts)
     team_idx = fitted["team_idx"]
     attacks, defenses = fitted["attacks"], fitted["defenses"]
     rho = fitted["rho"]

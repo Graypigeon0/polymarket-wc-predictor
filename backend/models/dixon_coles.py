@@ -169,6 +169,16 @@ REG_LAMBDA = 4.0
 FIFA_AVG_POINTS = 1500.0    # FIFA points that map to prior net rating 0
 PRIOR_SCALE = 500.0         # FIFA points per 1.0 net-rating unit
 
+# Opponent-strength weighting. Matches against very weak opponents carry less
+# information (a minnow beating an even weaker minnow says little about its true
+# strength). We weight each match by a logistic function of the opponent's FIFA
+# points, so results vs credible opposition count fully while results vs the
+# weakest teams are downweighted. This attacks residual confederation bias
+# (e.g. Haiti/Curacao racking up wins against weak CONCACAF opponents).
+OPP_STRENGTH_FLOOR = 0.35   # minimum weight (matches vs weakest teams)
+OPP_STRENGTH_MIDPOINT = 1250.0   # FIFA points at which weight = midpoint
+OPP_STRENGTH_STEEPNESS = 0.005   # logistic steepness per FIFA point
+
 # Robust regression parameters
 ROBUST_ITERATIONS = 5            # number of IRLS passes
 TUKEY_C = 4.0                    # bisquare cutoff; smaller = more aggressive downweighting
@@ -182,6 +192,20 @@ MIN_RESIDUAL_WEIGHT = 0.05       # floor so no match is fully excluded
 def _recency_weight(match_date: datetime, ref_date: datetime) -> float:
     months_old = (ref_date - match_date).days / 30.44
     return 0.5 ** (max(0.0, months_old) / RECENCY_HALF_LIFE_MONTHS)
+
+
+def _opponent_strength_weight(opp_fifa_points: float | None) -> float:
+    """
+    Logistic weight in [OPP_STRENGTH_FLOOR, 1.0] based on opponent FIFA points.
+    Strong opponent -> ~1.0; very weak opponent -> OPP_STRENGTH_FLOOR.
+    Unknown opponent points -> 1.0 (no downweight, neutral).
+    """
+    if opp_fifa_points is None:
+        return 1.0
+    import math as _m
+    logistic = 1.0 / (1.0 + _m.exp(
+        -OPP_STRENGTH_STEEPNESS * (opp_fifa_points - OPP_STRENGTH_MIDPOINT)))
+    return OPP_STRENGTH_FLOOR + (1.0 - OPP_STRENGTH_FLOOR) * logistic
 
 
 def _load_training_matches(as_of: str | None = None,
@@ -345,6 +369,24 @@ def _load_team_priors() -> dict[str, float]:
     return priors
 
 
+def _load_team_fifa_points() -> dict[str, float]:
+    """Return {team_id: fifa_points} for opponent-strength weighting."""
+    db = get_client()
+    pts: dict[str, float] = {}
+    offset = 0
+    while True:
+        r = (db.table("teams").select("id,fifa_points")
+             .range(offset, offset + 999).execute())
+        rows = r.data or []
+        for t in rows:
+            if t.get("fifa_points") is not None:
+                pts[t["id"]] = float(t["fifa_points"])
+        if len(rows) < 1000:
+            break
+        offset += 1000
+    return pts
+
+
 def _build_prior_arrays(team_idx: dict[str, int],
                         prior_net_by_id: dict[str, float]
                         ) -> tuple[np.ndarray, np.ndarray]:
@@ -361,7 +403,8 @@ def _build_prior_arrays(team_idx: dict[str, int],
 
 
 def _fit_core(matches: list[dict], as_of_date: datetime,
-              prior_net_by_id: dict[str, float] | None = None) -> dict[str, Any]:
+              prior_net_by_id: dict[str, float] | None = None,
+              fifa_points_by_id: dict[str, float] | None = None) -> dict[str, Any]:
     """
     Core robust-IRLS fit. Returns fitted parameters in memory (no DB writes).
 
@@ -376,12 +419,19 @@ def _fit_core(matches: list[dict], as_of_date: datetime,
         team_idx, prior_net_by_id or {})
 
     # Static weights (recency + competition)
+    fpts = fifa_points_by_id or {}
     base_weights = np.zeros(n_matches)
     for k, m in enumerate(matches):
         kickoff = datetime.fromisoformat(m["kickoff"].replace("Z", "+00:00"))
         wr = _recency_weight(kickoff, as_of_date)
         wc = COMPETITION_WEIGHTS.get(m["competition"], 0.4)
-        base_weights[k] = wr * wc
+        # Opponent-strength: from the home team's view the opponent is away, and
+        # vice-versa. Use the mean of both opponent-strength weights so a match
+        # between two minnows is downweighted from both directions.
+        w_opp_home = _opponent_strength_weight(fpts.get(m["away_id"]))
+        w_opp_away = _opponent_strength_weight(fpts.get(m["home_id"]))
+        w_opp = (w_opp_home + w_opp_away) / 2.0
+        base_weights[k] = wr * wc * w_opp
 
     x0 = np.zeros(2 * n_teams + 2)
     x0[-2] = 0.1
@@ -439,8 +489,10 @@ async def fit() -> dict[str, Any]:
 
     log.info("dixon_coles.fit.data", n_matches=len(matches))
     prior_net = _load_team_priors()
-    log.info("dixon_coles.fit.priors_loaded", n_with_prior=len(prior_net))
-    fitted = _fit_core(matches, datetime.now(timezone.utc), prior_net)
+    fifa_pts = _load_team_fifa_points()
+    log.info("dixon_coles.fit.priors_loaded",
+             n_with_prior=len(prior_net), n_with_points=len(fifa_pts))
+    fitted = _fit_core(matches, datetime.now(timezone.utc), prior_net, fifa_pts)
 
     # Persist ratings back to Supabase
     db = get_client()

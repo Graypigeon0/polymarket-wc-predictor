@@ -25,7 +25,7 @@ jobs:
           MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          EDGE_ALERT_THRESHOLD: "0.08"
+          EDGE_ALERT_THRESHOLD: "0.15"
           EDGE_ALERT_COOLDOWN_MINUTES: "30"
         run: |
           python -m backend.main pm-refresh
