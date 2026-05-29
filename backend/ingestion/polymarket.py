@@ -169,6 +169,7 @@ async def discover_wc_markets() -> dict[str, int]:
                     "description":   m.get("question") or ev.get("title"),
                     "outcome_label": f"{ev.get('title', '')} — {label_team}",
                     "team_id":       team_id,
+                    "event_slug":    ev.get("slug"),
                     "active":        True,
                 }, on_conflict="id").execute()
 

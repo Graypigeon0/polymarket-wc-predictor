@@ -9,6 +9,7 @@ type EdgeRow = {
   market_type: string
   market_label: string
   description: string
+  event_slug: string | null
   model_prob: number
   pm_prob: number
   edge: number
@@ -24,7 +25,7 @@ async function fetchEdges(): Promise<EdgeRow[]> {
     .from('edges')
     .select(`
       market_id, model_prob, pm_prob, edge, computed_at,
-      polymarket_markets!inner ( market_type, outcome_label, description )
+      polymarket_markets!inner ( market_type, outcome_label, description, event_slug )
     `)
     .gte('computed_at', cutoff)
     .order('computed_at', { ascending: false })
@@ -43,6 +44,7 @@ async function fetchEdges(): Promise<EdgeRow[]> {
       market_type: pm?.market_type ?? 'other',
       market_label: pm?.outcome_label ?? r.market_id,
       description: pm?.description ?? '',
+      event_slug: pm?.event_slug ?? null,
       model_prob: r.model_prob,
       pm_prob: r.pm_prob,
       edge: r.edge,
@@ -113,7 +115,9 @@ export default function Page() {
             <ul className="space-y-2">
               {rows.map(row => {
                 const grp = groupOf(row.market_label)
-                const polymarketUrl = `https://polymarket.com/market/${row.market_id}`
+                const polymarketUrl = row.event_slug
+                  ? `https://polymarket.com/event/${row.event_slug}`
+                  : 'https://polymarket.com/sports/fifa-world-cup/games'
                 return (
                   <li
                     key={row.market_id}
