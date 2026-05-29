@@ -104,11 +104,14 @@ async def _compute_overrounds(db) -> dict[str, Any]:
     """
     result: dict[str, Any] = {"outright": 1.0, "group_winner": {}}
 
-    # Outright: one big market
+    # Outright overround: only sum REAL team markets. Placeholder tokens like
+    # "Team AJ" (qualifying-playoff winners) trade at speculative prices and
+    # inflate the sum if included; excluding them gives a clean ~1.2x.
     outright = (db.table("polymarket_markets")
                 .select("id")
                 .eq("active", True)
                 .eq("market_type", "outright")
+                .not_.is_("team_id", "null")
                 .execute()).data or []
     total = 0.0
     counted = 0
