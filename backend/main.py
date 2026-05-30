@@ -285,5 +285,36 @@ def backtest(target: str = "EURO2024") -> None:
     typer.echo(json.dumps(result, indent=2))
 
 
+
+@cli.command(name="track-outcomes")
+def track_outcomes_cmd() -> None:
+    """Poll Polymarket for resolved markets; update DB; show running P&L."""
+    from backend.edges import outcomes
+    refresh_stats = asyncio.run(outcomes.refresh_resolutions())
+    typer.echo(f"Refresh: {refresh_stats}")
+    pnl = asyncio.run(outcomes.compute_pnl())
+    import json
+    typer.echo(json.dumps({k: v for k, v in pnl.items() if k != "per_market"},
+                          indent=2))
+    if pnl.get("per_market"):
+        typer.echo("\nPer-market breakdown:")
+        for row in pnl["per_market"][:20]:
+            typer.echo(f"  {row}")
+
+
+@cli.command()
+def pnl() -> None:
+    """Show current P&L summary without polling for new resolutions."""
+    from backend.edges import outcomes
+    result = asyncio.run(outcomes.compute_pnl())
+    import json
+    typer.echo(json.dumps({k: v for k, v in result.items() if k != "per_market"},
+                          indent=2))
+    if result.get("per_market"):
+        typer.echo("\nPer-market breakdown:")
+        for row in result["per_market"][:30]:
+            typer.echo(f"  {row}")
+
+
 if __name__ == "__main__":
     cli()

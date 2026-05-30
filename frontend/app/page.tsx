@@ -4,6 +4,59 @@ import useSWR from 'swr'
 import { supabase } from '@/lib/supabase'
 import clsx from 'clsx'
 
+type Pnl = {
+  n_bets: number
+  n_resolved: number
+  n_pending: number
+  n_won: number | null
+  hit_rate: number | null
+  total_profit: number
+  roi: number | null
+}
+
+async function fetchPnl(): Promise<Pnl> {
+  // First alerts per market
+  const { data: edges, error } = await supabase
+    .from('edges')
+    .select('market_id, pm_prob, alerted_at')
+    .eq('alerted', true)
+    .order('alerted_at', { ascending: true })
+  if (error) throw error
+  const first: Record<string, { pm_prob: number }> = {}
+  for (const e of edges ?? []) {
+    if (!(e.market_id in first)) first[e.market_id] = { pm_prob: e.pm_prob }
+  }
+  const ids = Object.keys(first)
+  if (ids.length === 0) {
+    return { n_bets: 0, n_resolved: 0, n_pending: 0, n_won: 0,
+             hit_rate: null, total_profit: 0, roi: null }
+  }
+  const { data: mkts } = await supabase
+    .from('polymarket_markets')
+    .select('id, resolved, resolution_outcome')
+    .in('id', ids)
+  let resolved = 0, won = 0, profit = 0, staked = 0
+  for (const m of mkts ?? []) {
+    if (!m.resolved) continue
+    resolved++; staked += 1
+    const pm = first[m.id].pm_prob
+    if (m.resolution_outcome === 'Yes' && pm > 0) {
+      profit += (1 - pm) / pm; won++
+    } else {
+      profit -= 1
+    }
+  }
+  return {
+    n_bets: ids.length,
+    n_resolved: resolved,
+    n_pending: ids.length - resolved,
+    n_won: resolved > 0 ? won : null,
+    hit_rate: resolved > 0 ? won / resolved : null,
+    total_profit: Math.round(profit * 100) / 100,
+    roi: staked > 0 ? Math.round((profit / staked) * 1000) / 1000 : null,
+  }
+}
+
 type EdgeRow = {
   market_id: string
   market_type: string
@@ -74,6 +127,31 @@ function groupOf(label: string): string | null {
   return m ? m[1] : null
 }
 
+function PnlCard() {
+  const { data } = useSWR('pnl', fetchPnl, { refreshInterval: 5 * 60_000 })
+  if (!data || data.n_bets === 0) return null
+  const profitColor =
+    data.total_profit > 0 ? 'text-green-400'
+    : data.total_profit < 0 ? 'text-red-400'
+    : 'text-neutral-300'
+  return (
+    <section className="mb-6 rounded-lg border border-neutral-800 bg-neutral-900 p-3">
+      <h2 className="text-sm font-semibold uppercase tracking-wide text-neutral-400 mb-2">
+        Model P&L <span className="text-neutral-600 font-normal">(flat $1 stakes)</span>
+      </h2>
+      <div className="grid grid-cols-2 gap-2 text-sm">
+        <div><span className="text-neutral-500">Bets placed:</span> {data.n_bets}</div>
+        <div><span className="text-neutral-500">Resolved:</span> {data.n_resolved} / {data.n_pending} pending</div>
+        <div><span className="text-neutral-500">Hit rate:</span> {data.hit_rate !== null ? `${(data.hit_rate * 100).toFixed(0)}%` : '—'}</div>
+        <div className={profitColor}>
+          <span className="text-neutral-500">Profit:</span> ${data.total_profit.toFixed(2)}
+          {data.roi !== null && ` (${(data.roi * 100).toFixed(1)}% ROI)`}
+        </div>
+      </div>
+    </section>
+  )
+}
+
 export default function Page() {
   const { data, error, isLoading } = useSWR('edges', fetchEdges, {
     refreshInterval: 60_000,
@@ -97,6 +175,7 @@ export default function Page() {
           Live model vs. Polymarket — auto-refreshes every minute
         </p>
       </header>
+      <PnlCard />
 
       {isLoading && <p className="text-neutral-400">Loading…</p>}
       {error && (
