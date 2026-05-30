@@ -316,5 +316,31 @@ def pnl() -> None:
             typer.echo(f"  {row}")
 
 
+
+@cli.command()
+def drift() -> None:
+    """Show closing-line drift: did Polymarket prices move toward our model?"""
+    from backend.edges import drift as drift_module
+    result = asyncio.run(drift_module.compute_drift_summary())
+    import json
+    typer.echo(json.dumps({k: v for k, v in result.items() if k != "per_market"},
+                          indent=2))
+    if result.get("per_market"):
+        typer.echo("\nPer-market drift (sorted by drift_pp DESC):")
+        for row in result["per_market"][:30]:
+            typer.echo(f"  {row}")
+
+
+@cli.command(name="selftest-match-1x2")
+def selftest_match_1x2() -> None:
+    """End-to-end sanity test of the match_1x2 edge path with synthetic data."""
+    from backend.edges import selftest
+    result = asyncio.run(selftest.run_match_1x2_selftest())
+    import json
+    typer.echo(json.dumps(result, indent=2))
+    if result.get("status") not in ("PASS", "SKIP"):
+        raise typer.Exit(code=1)
+
+
 if __name__ == "__main__":
     cli()

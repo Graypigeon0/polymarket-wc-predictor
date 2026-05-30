@@ -152,6 +152,108 @@ function PnlCard() {
   )
 }
 
+type DriftRow = {
+  market: string
+  alert_pm: number
+  latest_pm: number
+  drift_pp: number
+  direction: 'toward' | 'away' | 'flat'
+}
+
+type DriftSummary = {
+  n_markets: number
+  n_toward: number
+  n_away: number
+  pct_toward: number
+  avg_signed_drift_pp: number
+  per_market: DriftRow[]
+}
+
+async function fetchDrift(): Promise<DriftSummary> {
+  // Re-implements the Python drift computation in the browser.
+  const { data: edges } = await supabase
+    .from('edges').select('market_id, model_prob, pm_prob, alerted_at')
+    .eq('alerted', true).order('alerted_at', { ascending: true })
+  const first: Record<string, { model: number; alert_pm: number }> = {}
+  for (const e of edges ?? []) {
+    if (!(e.market_id in first))
+      first[e.market_id] = { model: e.model_prob, alert_pm: e.pm_prob }
+  }
+  const ids = Object.keys(first)
+  if (ids.length === 0)
+    return { n_markets: 0, n_toward: 0, n_away: 0, pct_toward: 0,
+             avg_signed_drift_pp: 0, per_market: [] }
+
+  // For each, fetch latest price + label
+  const { data: mkts } = await supabase
+    .from('polymarket_markets').select('id, outcome_label').in('id', ids)
+  const labels: Record<string, string> = {}
+  for (const m of mkts ?? []) labels[m.id] = m.outcome_label ?? m.id
+
+  const rows: DriftRow[] = []
+  let toward = 0, away = 0, totalSigned = 0
+  for (const id of ids) {
+    const { data: pr } = await supabase
+      .from('polymarket_prices').select('price')
+      .eq('market_id', id).order('captured_at', { ascending: false }).limit(1)
+    const latest = pr?.[0]?.price
+    if (latest == null) continue
+    const { model, alert_pm } = first[id]
+    const drift = latest - alert_pm
+    const signTowards = model > alert_pm ? 1 : -1
+    const signed = drift * signTowards
+    const direction: 'toward'|'away'|'flat' =
+      Math.abs(signed) < 0.005 ? 'flat' : signed > 0 ? 'toward' : 'away'
+    if (direction === 'toward') toward++
+    else if (direction === 'away') away++
+    totalSigned += signed
+    rows.push({
+      market: labels[id] ?? id.slice(0, 24),
+      alert_pm: Math.round(alert_pm * 1000) / 1000,
+      latest_pm: Math.round(latest * 1000) / 1000,
+      drift_pp: Math.round(drift * 1000) / 10,
+      direction,
+    })
+  }
+  const n = rows.length
+  rows.sort((a, b) => b.drift_pp - a.drift_pp)
+  return {
+    n_markets: n,
+    n_toward: toward, n_away: away,
+    pct_toward: n > 0 ? toward / n : 0,
+    avg_signed_drift_pp: n > 0 ? Math.round((totalSigned / n * 100) * 10) / 10 : 0,
+    per_market: rows,
+  }
+}
+
+function DriftCard() {
+  const { data } = useSWR('drift', fetchDrift, { refreshInterval: 10 * 60_000 })
+  if (!data || data.n_markets === 0) return null
+  const towardColor =
+    data.pct_toward > 0.55 ? 'text-green-400' :
+    data.pct_toward < 0.45 ? 'text-red-400' : 'text-neutral-300'
+  return (
+    <section className="mb-6 rounded-lg border border-neutral-800 bg-neutral-900 p-3">
+      <h2 className="text-sm font-semibold uppercase tracking-wide text-neutral-400 mb-2">
+        Line drift since alert
+      </h2>
+      <div className="grid grid-cols-2 gap-2 text-sm mb-2">
+        <div className={towardColor}>
+          <span className="text-neutral-500">Toward us:</span> {(data.pct_toward * 100).toFixed(0)}%
+          <span className="text-neutral-600 text-xs"> ({data.n_toward}/{data.n_markets})</span>
+        </div>
+        <div className={data.avg_signed_drift_pp > 0 ? 'text-green-400' : data.avg_signed_drift_pp < 0 ? 'text-red-400' : ''}>
+          <span className="text-neutral-500">Avg drift:</span> {data.avg_signed_drift_pp > 0 ? '+' : ''}{data.avg_signed_drift_pp.toFixed(1)} pp
+        </div>
+      </div>
+      <p className="text-xs text-neutral-500">
+        Market moving toward our model = good (we found mispricing early).
+        Moving away = we may have been wrong.
+      </p>
+    </section>
+  )
+}
+
 export default function Page() {
   const { data, error, isLoading } = useSWR('edges', fetchEdges, {
     refreshInterval: 60_000,
@@ -176,6 +278,7 @@ export default function Page() {
         </p>
       </header>
       <PnlCard />
+      <DriftCard />
 
       {isLoading && <p className="text-neutral-400">Loading…</p>}
       {error && (
