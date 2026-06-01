@@ -1,0 +1,52 @@
+name: Refresh Results
+
+# Pulls the latest international results from martj42 (idempotent upsert),
+# then refits the model and regenerates predictions so that pre-WC friendlies,
+# warm-up matches, and any late results actually reach the engine.
+#
+# This is the missing link: match-model.yml refits daily, but it was refitting
+# on whatever was last manually backfilled. This re-pulls results FIRST.
+#
+# Runs daily at 02:30 UTC — half an hour before the existing 03:00 refit/sim,
+# so fresh data is in Supabase before anything trains on it.
+
+on:
+  schedule:
+    - cron: "30 2 * * *"
+  workflow_dispatch:
+    inputs:
+      years:
+        description: "Years of history to (re-)pull"
+        required: false
+        default: "5"
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -e .
+
+      - name: Pull latest international results
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python -m backend.main backfill-martj42 --years ${{ inputs.years || '5' }}
+
+      - name: Refit base ratings on fresh data
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python -m backend.main fit
+
+      - name: Regenerate match predictions
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python -m backend.main predict
