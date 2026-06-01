@@ -1,0 +1,10 @@
+{
+  "id": "/bets",
+  "name": "My Bets",
+  "short_name": "My Bets",
+  "start_url": "/bets",
+  "scope": "/bets",
+  "display": "standalone",
+  "background_color": "#0b0e14",
+  "theme_color": "#0b0e14"
+}
