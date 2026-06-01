@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     supabase_db_url: str | None = Field(None, alias="SUPABASE_DB_URL")
 
     # LLM (Mistral primary — EU-based, works in Cyprus and all EU countries)
-    mistral_api_key: str = Field(..., alias="MISTRAL_API_KEY")
+    mistral_api_key: str | None = Field(None, alias="MISTRAL_API_KEY")
     mistral_model: str = Field("mistral-small-latest", alias="MISTRAL_MODEL")
     groq_api_key: str | None = Field(None, alias="GROQ_API_KEY")
     groq_model: str = Field("llama-3.3-70b-versatile", alias="GROQ_MODEL")
@@ -29,8 +29,8 @@ class Settings(BaseSettings):
     gemini_model: str = Field("gemini-2.5-flash", alias="GEMINI_MODEL")
 
     # Telegram
-    telegram_bot_token: str = Field(..., alias="TELEGRAM_BOT_TOKEN")
-    telegram_chat_id: str = Field(..., alias="TELEGRAM_CHAT_ID")
+    telegram_bot_token: str | None = Field(None, alias="TELEGRAM_BOT_TOKEN")
+    telegram_chat_id: str | None = Field(None, alias="TELEGRAM_CHAT_ID")
 
     # Sports data
     football_data_api_key: str | None = Field(None, alias="FOOTBALL_DATA_API_KEY")
