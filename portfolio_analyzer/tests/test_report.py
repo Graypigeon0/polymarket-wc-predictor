@@ -18,6 +18,7 @@ from portfolio_analyzer.report import (
     NO_CANDIDATES,
     NON_EQUITY_VALUATION,
     HoldingAnalysis,
+    annualised_volatility,
     pct_below,
     render_markdown,
 )
@@ -221,3 +222,34 @@ def test_screen_skipped_message():
     md = _render({"AAA": _analysis()}, screen_skipped=True)
     assert "Underpriced screen skipped (--universe none)" in md
     assert NO_CANDIDATES not in md
+
+
+def test_annualised_volatility_uses_365_for_crypto_and_252_otherwise():
+    eq = _td("AAA", "equity")
+    cr = TickerData("BTC-USD", "crypto", eq.prices.copy(), {})
+    rets = eq.prices["Close"].pct_change().dropna()
+    expect_eq = float(rets.std() * np.sqrt(252) * 100)
+    expect_cr = float(rets.std() * np.sqrt(365) * 100)
+    assert abs(annualised_volatility(eq) - expect_eq) < 1e-9
+    assert abs(annualised_volatility(cr) - expect_cr) < 1e-9
+    assert annualised_volatility(cr) > annualised_volatility(eq)
+    for ac in ("etf", "commodity"):
+        assert abs(annualised_volatility(TickerData("X", ac, eq.prices, {})) - expect_eq) < 1e-9
+
+
+def test_annualised_volatility_none_with_fewer_than_30_returns():
+    td = _td("AAA")
+    short = TickerData("AAA", "equity", td.prices.iloc[:30], {})  # 29 returns
+    assert annualised_volatility(short) is None
+    ok = TickerData("AAA", "equity", td.prices.iloc[:31], {})  # 30 returns
+    assert annualised_volatility(ok) is not None
+
+
+def test_report_shows_annualised_volatility_line():
+    a = _analysis("AAA")
+    md = _render({"AAA": a})
+    vol = annualised_volatility(a.data)
+    assert f"Annualised volatility: {vol:.1f}%" in md
+    short = _analysis("SHORT")
+    short.data = TickerData("SHORT", "equity", short.data.prices.iloc[:20], {})
+    assert "Annualised volatility: n/a" in _render({"SHORT": short})

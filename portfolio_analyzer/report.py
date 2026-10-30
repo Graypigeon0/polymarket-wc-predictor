@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+from portfolio_analyzer.data import annualisation_factor
 from portfolio_analyzer.models import (
     CandleReading,
     HedgeResult,
@@ -20,6 +21,7 @@ STRESS_LABELS = {
     "covid_2020": "COVID crash (19 Feb-23 Mar 2020)",
     "bear_2022": "2022 bear market (3 Jan-12 Oct 2022)",
 }
+MIN_VOL_RETURNS = 30
 NO_CANDIDATES = "No candidates found (fundamentals unavailable or none passed the filters)"
 
 
@@ -44,6 +46,22 @@ def last_close(data: TickerData) -> float | None:
         return None
     value = float(close.iloc[-1])
     return value if math.isfinite(value) else None
+
+
+def annualised_volatility(data: TickerData) -> float | None:
+    """Std of daily Close returns x sqrt(365 crypto / 252 others), in percent.
+
+    None when there are fewer than MIN_VOL_RETURNS usable returns.
+    """
+    prices = data.prices
+    if prices is None or "Close" not in prices.columns:
+        return None
+    rets = prices["Close"].astype(float).pct_change(fill_method=None)
+    rets = rets.replace([math.inf, -math.inf], math.nan).dropna()
+    if len(rets) < MIN_VOL_RETURNS:
+        return None
+    vol = float(rets.std() * math.sqrt(annualisation_factor(data.asset_class)) * 100)
+    return vol if math.isfinite(vol) else None
 
 
 def pct_below(price: float | None, stop: float | None) -> str:
@@ -74,10 +92,14 @@ def _valuation_line(h: HoldingAnalysis) -> str:
 def _holding_section(holding: Holding, h: HoldingAnalysis) -> list[str]:
     price = last_close(h.data)
     price_txt = f"{price:.2f}" if price is not None else "n/a"
+    vol = annualised_volatility(h.data)
+    vol_txt = f"{vol:.1f}%" if vol is not None else "n/a"
     lines = [
         f"## {holding.ticker} ({h.data.asset_class}, {holding.weight:.1%} of portfolio)",
         "",
         f"Last close: {price_txt}",
+        "",
+        f"Annualised volatility: {vol_txt}",
         "",
         "**Bullish**",
         *[f"- {b}" for b in h.outlook.bullish],

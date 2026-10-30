@@ -89,6 +89,7 @@ ignore = ["E501"]
 testpaths = ["backend/tests", "portfolio_analyzer/tests"]
 asyncio_mode = "auto"
 markers = ["network: tests that hit the network"]
+addopts = "-m 'not network'"
 
 [tool.mypy]
 python_version = "3.11"
