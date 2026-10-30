@@ -12,6 +12,7 @@ from portfolio_analyzer.models import (
     TickerData,
     ValuationCandidate,
 )
+from portfolio_analyzer.valuation import MIN_SECTOR_PEERS, ScreenStats
 
 DISCLAIMER = "Not financial advice. Signals are heuristics, not predictions."
 NON_EQUITY_VALUATION = "valuation n/a (no earnings/cash flow)"
@@ -145,13 +146,39 @@ def _hedge_section(hedge: HedgeResult | None) -> list[str]:
     return [*lines, ""]
 
 
-def _underpriced_section(candidates: list[ValuationCandidate], skipped: list[str]) -> list[str]:
+def _stats_lines(stats: ScreenStats) -> list[str]:
+    sectors = ", ".join(stats.small_sectors) if stats.small_sectors else "none"
+    lines = [
+        f"Universe: {stats.considered} equities fetched; {stats.skipped_fundamentals} skipped "
+        f"(missing fundamentals); {stats.excluded_by_filters} excluded by filters; sectors with "
+        f"fewer than {MIN_SECTOR_PEERS} qualifying peers left out: {sectors}."
+    ]
+    if stats.skipped_fundamentals * 2 > stats.considered:
+        lines = [
+            f"**WARNING: fundamentals were largely unavailable ({stats.skipped_fundamentals} of "
+            f"{stats.considered} equities); this list is unreliable.**",
+            "",
+            *lines,
+        ]
+    return lines
+
+
+def _underpriced_section(
+    candidates: list[ValuationCandidate],
+    skipped: list[str],
+    stats: ScreenStats | None = None,
+    screen_skipped: bool = False,
+) -> list[str]:
     lines = ["## Underpriced candidates (to research, not buy recommendations)", ""]
+    if screen_skipped:
+        return [*lines, "Underpriced screen skipped (--universe none)", ""]
     if candidates:
         for c in candidates:
             lines.append(f"- {c.ticker} (score {c.score:.2f}): {'; '.join(c.reasons)}")
     else:
         lines.append(NO_CANDIDATES)
+    if stats is not None:
+        lines += ["", *_stats_lines(stats)]
     if skipped:
         lines += [
             "",
@@ -169,6 +196,8 @@ def render_markdown(
     errors: dict[str, str],
     skipped_valuation: list[str],
     warnings: list[str],
+    screen_stats: ScreenStats | None = None,
+    screen_skipped: bool = False,
 ) -> str:
     lines = ["# Portfolio analysis", "", f"_{DISCLAIMER}_", ""]
     if warnings:
@@ -179,6 +208,6 @@ def render_markdown(
         if holding.ticker in analyses:
             lines += _holding_section(holding, analyses[holding.ticker])
     lines += _hedge_section(hedge)
-    lines += _underpriced_section(candidates, skipped_valuation)
+    lines += _underpriced_section(candidates, skipped_valuation, screen_stats, screen_skipped)
     lines += ["---", DISCLAIMER, ""]
     return "\n".join(lines)

@@ -21,6 +21,7 @@ from portfolio_analyzer.report import (
     pct_below,
     render_markdown,
 )
+from portfolio_analyzer.valuation import ScreenStats
 
 
 def _td(ticker: str, asset_class: str = "equity", fundamentals=None) -> TickerData:
@@ -60,7 +61,9 @@ def _hedge(**kw) -> HedgeResult:
     return HedgeResult(**base)
 
 
-def _render(analyses, holdings=None, hedge=None, candidates=(), errors=None, skipped=(), warns=()):
+def _render(
+    analyses, holdings=None, hedge=None, candidates=(), errors=None, skipped=(), warns=(), **kw
+):
     holdings = holdings or [Holding(t, 1 / len(analyses)) for t in analyses]
     return render_markdown(
         holdings=holdings,
@@ -70,6 +73,7 @@ def _render(analyses, holdings=None, hedge=None, candidates=(), errors=None, ski
         errors=errors or {},
         skipped_valuation=list(skipped),
         warnings=list(warns),
+        **kw,
     )
 
 
@@ -182,3 +186,38 @@ def test_stress_windows_use_readable_labels_with_fallback():
     assert "2022 bear market (3 Jan-12 Oct 2022): skipped (no history)" in md
     assert "custom_x: portfolio" in md
     assert "covid_2020" not in md
+
+
+def test_stats_line_under_candidates_and_no_candidates_message():
+    stats = ScreenStats(considered=100, skipped_fundamentals=10, excluded_by_filters=40,
+                        small_sectors=["Energy", "Utilities"])
+    md = _render({"AAA": _analysis()}, screen_stats=stats)
+    expect = (
+        "Universe: 100 equities fetched; 10 skipped (missing fundamentals); 40 excluded by "
+        "filters; sectors with fewer than 3 qualifying peers left out: Energy, Utilities."
+    )
+    assert expect in md
+    assert md.index(NO_CANDIDATES) < md.index(expect)
+    assert "unreliable" not in md
+    c = ValuationCandidate("ZZZ", 0.9, ["low P/E"])
+    md = _render({"AAA": _analysis()}, candidates=[c], screen_stats=stats)
+    assert md.index("ZZZ (score") < md.index(expect)
+
+
+def test_stats_line_with_no_small_sectors_says_none():
+    md = _render({"AAA": _analysis()}, screen_stats=ScreenStats(10, 1, 2, []))
+    assert "left out: none." in md
+
+
+def test_warning_when_more_than_half_skipped_for_fundamentals():
+    md = _render({"AAA": _analysis()}, screen_stats=ScreenStats(500, 401, 10, []))
+    assert "WARNING" in md and "fundamentals were largely unavailable" in md
+    assert "unreliable" in md
+    md = _render({"AAA": _analysis()}, screen_stats=ScreenStats(500, 250, 10, []))
+    assert "WARNING" not in md  # exactly half is not "more than half"
+
+
+def test_screen_skipped_message():
+    md = _render({"AAA": _analysis()}, screen_skipped=True)
+    assert "Underpriced screen skipped (--universe none)" in md
+    assert NO_CANDIDATES not in md

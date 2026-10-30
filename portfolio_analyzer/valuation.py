@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,17 @@ YEAR_ROWS = 252
 UNKNOWN_SECTOR = "Unknown"
 NEUTRAL_RANK = 0.5  # rank for a factor with a single peer (avoids 0/0 -> NaN)
 SCORE_DECIMALS = 4
+MIN_SECTOR_PEERS = 3  # qualifying stocks a sector needs before anything in it is ranked
+
+
+@dataclass
+class ScreenStats:
+    """What the screen did with the universe (equities only)."""
+
+    considered: int = 0
+    skipped_fundamentals: int = 0
+    excluded_by_filters: int = 0
+    small_sectors: list[str] = field(default_factory=list)  # < MIN_SECTOR_PEERS qualifying
 
 
 def load_universe(spec: str) -> list[str]:
@@ -113,24 +125,41 @@ def _pct_rank(values: pd.Series, higher_is_cheaper: bool) -> pd.Series:
 
 
 def screen_underpriced(universe: dict[str, TickerData], top: int = 10) -> list[ValuationCandidate]:
+    return screen_with_stats(universe, top)[0]
+
+
+def screen_with_stats(
+    universe: dict[str, TickerData], top: int = 10
+) -> tuple[list[ValuationCandidate], ScreenStats]:
+    stats = ScreenStats()
     rows: dict[str, dict[str, float | None]] = {}
     sectors: dict[str, str] = {}
     for ticker, data in universe.items():
+        if data.asset_class != "equity":
+            continue
+        stats.considered += 1
+        if not has_fundamentals(data):
+            stats.skipped_fundamentals += 1
+            continue
         factors = _factors(data)
         if factors is None:
+            stats.excluded_by_filters += 1
             continue
         rows[ticker] = factors
         sector = data.fundamentals.get("sector")
         sectors[ticker] = str(sector) if sector else UNKNOWN_SECTOR
     if not rows:
-        return []
+        return [], stats
 
     frame = pd.DataFrame.from_dict(rows, orient="index").astype(float)
     frame["sector"] = pd.Series(sectors)
     # (column, higher raw value is cheaper)
     directions = {"pe": False, "peg": False, "fcf_yield": True, "range": False}
     candidates: list[ValuationCandidate] = []
-    for _, group in frame.groupby("sector"):
+    for sector, group in frame.groupby("sector"):
+        if len(group) < MIN_SECTOR_PEERS:
+            stats.small_sectors.append(str(sector))
+            continue
         ranks = pd.DataFrame(
             {col: _pct_rank(group[col], up) for col, up in directions.items()},
             index=group.index,
@@ -141,7 +170,7 @@ def screen_underpriced(universe: dict[str, TickerData], top: int = 10) -> list[V
             if avail.empty:
                 continue
             row = group.loc[ticker]
-            reasons = [f"P/E {row['pe']:.1f} vs sector median {medians['pe']:.1f}"]
+            reasons = [f"P/E {row['pe']:.1f} vs sector median {medians['pe']:.1f} (n={len(group)})"]
             if not np.isnan(row["peg"]):
                 reasons.append(f"PEG {row['peg']:.2f} vs sector median {medians['peg']:.2f}")
             if not np.isnan(row["fcf_yield"]):
@@ -152,5 +181,6 @@ def screen_underpriced(universe: dict[str, TickerData], top: int = 10) -> list[V
                 reasons.append(f"{row['range']:.0%} of the way up its 52-week range")
             score = round(float(avail.mean()), SCORE_DECIMALS)
             candidates.append(ValuationCandidate(ticker, score, reasons))
+    stats.small_sectors.sort()
     candidates.sort(key=lambda c: (-c.score, c.ticker))
-    return candidates[: max(top, 0)]
+    return candidates[: max(top, 0)], stats

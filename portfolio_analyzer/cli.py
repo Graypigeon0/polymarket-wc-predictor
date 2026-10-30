@@ -23,10 +23,15 @@ from portfolio_analyzer.outlook import NarrationError, build_outlook
 from portfolio_analyzer.outlook import narrate as narrate_outlook
 from portfolio_analyzer.report import HoldingAnalysis, last_close, render_markdown
 from portfolio_analyzer.stops import suggest_stop
-from portfolio_analyzer.valuation import has_fundamentals, load_universe, screen_underpriced
+from portfolio_analyzer.valuation import (
+    MIN_SECTOR_PEERS,
+    has_fundamentals,
+    load_universe,
+    screen_with_stats,
+)
 
-MIN_SECTOR_PEERS = 3
 UNIVERSE_WORKERS = 8
+NO_UNIVERSE = "none"  # --universe none skips the underpriced screen
 EXIT_USAGE = 2
 
 app = typer.Typer(add_completion=False, help="Portfolio analyzer: decision support, not advice.")
@@ -150,7 +155,7 @@ def main(
     benchmark: Annotated[str, typer.Option(help="Benchmark ticker for the hedge.")] = "SPY",
     report: Annotated[Path | None, typer.Option(help="Write the Markdown report here.")] = None,
     narrate: Annotated[bool, typer.Option("--narrate", help="LLM narration (API key).")] = False,
-    universe: Annotated[str, typer.Option(help="'sp500' or a file of tickers.")] = "sp500",
+    universe: Annotated[str, typer.Option(help="'sp500', a file of tickers, or 'none'.")] = "sp500",
 ) -> None:
     run(tickers, benchmark, report, narrate, universe)
 
@@ -174,7 +179,8 @@ def _run(
     except ValueError as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(EXIT_USAGE) from None
-    if universe.strip().lower() != "sp500" and not Path(universe).is_file():
+    skip_screen = universe.strip().lower() == NO_UNIVERSE
+    if universe.strip().lower() not in ("sp500", NO_UNIVERSE) and not Path(universe).is_file():
         typer.echo(f"Error: universe file not found: {universe}", err=True)
         raise typer.Exit(EXIT_USAGE)
     client = _make_client() if narrate_on else None
@@ -216,11 +222,12 @@ def _run(
         except Exception as exc:  # unexpected: report, do not crash the run
             bench_error = f"internal error: {type(exc).__name__}: {exc}"
 
-    try:
-        names = load_universe(universe)
-    except Exception as exc:
-        names = []
-        warnings.append(f"Universe '{universe}' could not be loaded: {exc}")
+    names: list[str] = []
+    if not skip_screen:
+        try:
+            names = load_universe(universe)
+        except Exception as exc:
+            warnings.append(f"Universe '{universe}' could not be loaded: {exc}")
     held = {h.ticker for h in holdings}
     universe_data = _fetch_universe([n for n in names if n not in fetched], warnings)
     universe_data.update({t: d for t, d in fetched.items() if t in names})
@@ -253,7 +260,11 @@ def _run(
     else:
         hedge = analyse_hedge(holdings, fetched, bench)
 
-    candidates = screen_underpriced({t: d for t, d in universe_data.items() if t not in held})
+    candidates, stats = [], None
+    if not skip_screen:
+        candidates, stats = screen_with_stats(
+            {t: d for t, d in universe_data.items() if t not in held}
+        )
     md = render_markdown(
         holdings=holdings,
         analyses=analyses,
@@ -262,6 +273,8 @@ def _run(
         errors=errors,
         skipped_valuation=skipped,
         warnings=warnings,
+        screen_stats=stats,
+        screen_skipped=skip_screen,
     )
     console.print(Markdown(md))
     write_failed = False

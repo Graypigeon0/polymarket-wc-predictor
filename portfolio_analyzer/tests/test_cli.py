@@ -314,3 +314,60 @@ def test_bad_report_path_still_prints_report_and_exits_1(monkeypatch, tmp_path, 
     assert res.exit_code == 1
     assert "could not write report" in res.output
     assert "Portfolio analysis" in res.output
+
+
+def _uni_fetch(skip_fundamentals=()):
+    f = {"trailingPE": 8.0, "freeCashflow": 1e9, "marketCap": 1e10, "sector": "Tech"}
+
+    def fake(ticker, **kw):
+        if ticker.startswith("U"):
+            return _td(ticker, "equity", {} if ticker in skip_fundamentals else dict(f))
+        return _td(ticker, "equity")
+
+    return fake
+
+
+def test_cli_prints_universe_stats_line(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "fetch", _uni_fetch(skip_fundamentals={"U4"}))
+    uni = tmp_path / "u.txt"
+    uni.write_text("U1\nU2\nU3\nU4\n")
+    out = tmp_path / "r.md"
+    res = runner.invoke(cli.app, ["AAA", "--universe", str(uni), "--report", str(out)])
+    assert res.exit_code == 0, res.output
+    md = out.read_text()
+    assert "Universe: 4 equities fetched; 1 skipped (missing fundamentals);" in md
+    assert "(n=3)" in md
+    assert "WARNING" not in md
+
+
+def test_cli_warns_when_fundamentals_largely_unavailable(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "fetch", _uni_fetch(skip_fundamentals={"U1", "U2", "U3"}))
+    uni = tmp_path / "u.txt"
+    uni.write_text("U1\nU2\nU3\nU4\n")
+    out = tmp_path / "r.md"
+    res = runner.invoke(cli.app, ["AAA", "--universe", str(uni), "--report", str(out)])
+    assert res.exit_code == 0, res.output
+    md = out.read_text()
+    assert "fundamentals were largely unavailable" in md
+    assert "No candidates found" in md
+
+
+@pytest.mark.parametrize("spec", ["none", "NONE", " None "])
+def test_universe_none_skips_screen_entirely(monkeypatch, tmp_path, spec):
+    fetched: list[str] = []
+    base = _fake_fetch()
+
+    def fake(ticker, **kw):
+        fetched.append(ticker)
+        return base(ticker, **kw)
+
+    def boom(_spec):
+        raise AssertionError("load_universe must not be called")
+
+    monkeypatch.setattr(cli, "fetch", fake)
+    monkeypatch.setattr(cli, "load_universe", boom)
+    out = tmp_path / "r.md"
+    res = runner.invoke(cli.app, ["AAA", "--universe", spec, "--report", str(out)])
+    assert res.exit_code == 0, res.output
+    assert "Underpriced screen skipped (--universe none)" in out.read_text()
+    assert sorted(fetched) == ["AAA", "SPY"]  # holdings + benchmark only
