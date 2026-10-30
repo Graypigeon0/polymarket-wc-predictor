@@ -82,6 +82,36 @@ def test_all_provider_failures_exit_nonzero(monkeypatch, universe_file):
     assert "Portfolio analysis" not in res.output
 
 
+def test_unexpected_exception_is_internal_error_not_provider_outage(monkeypatch, tmp_path):
+    base = _fake_fetch()
+
+    def fake(ticker, **kw):
+        if ticker == "AAA":
+            raise RuntimeError("yfinance API changed: unexpected keyword")
+        return base(ticker, **kw)
+
+    monkeypatch.setattr(cli, "fetch", fake)
+    uni = tmp_path / "u.txt"
+    uni.write_text("U1\n")
+    out = tmp_path / "r.md"
+    res = runner.invoke(cli.app, ["AAA", "BBB", "--universe", str(uni), "--report", str(out)])
+    assert res.exit_code == 0, res.output
+    md = out.read_text()
+    assert "- AAA: internal error: RuntimeError: yfinance API changed" in md
+    assert "Could not reach" not in md
+
+
+def test_all_internal_errors_do_not_claim_provider_outage(monkeypatch, universe_file):
+    def fake(ticker, **kw):
+        raise RuntimeError("yfinance API changed: boom")
+
+    monkeypatch.setattr(cli, "fetch", fake)
+    res = runner.invoke(cli.app, ["AAA", "BBB", "--universe", universe_file])
+    assert res.exit_code == 1
+    assert "could not be reached" not in res.output
+    assert "internal error" in res.output
+
+
 def test_mixed_provider_failure_continues(monkeypatch, universe_file):
     monkeypatch.setattr(cli, "fetch", _fake_fetch(provider_fail={"BBB"}))
     res = runner.invoke(cli.app, ["AAA", "BBB", "--universe", universe_file])

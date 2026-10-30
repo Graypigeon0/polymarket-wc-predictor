@@ -192,6 +192,8 @@ def _run(
             provider_failures += 1
         except DataError as exc:
             errors[h.ticker] = str(exc)
+        except Exception as exc:  # unexpected: an internal error, not a provider outage
+            errors[h.ticker] = f"internal error: {type(exc).__name__}: {exc}"
     if provider_failures == len(holdings):
         typer.echo(
             "Error: the data provider (Yahoo Finance) could not be reached for any holding: "
@@ -211,6 +213,8 @@ def _run(
             bench = fetch(benchmark.upper())
         except DataError as exc:
             bench_error = str(exc)
+        except Exception as exc:  # unexpected: report, do not crash the run
+            bench_error = f"internal error: {type(exc).__name__}: {exc}"
 
     try:
         names = load_universe(universe)

@@ -49,7 +49,7 @@ dependencies = [
     "rich>=13.7",
 
     # Portfolio analyzer
-    "yfinance>=0.2.40",
+    "yfinance>=0.2.40,<2",
 ]
 
 [project.optional-dependencies]
