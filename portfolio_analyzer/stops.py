@@ -59,23 +59,31 @@ def suggest_stop(data: TickerData) -> StopSuggestion:
     if not np.isfinite(a) or not np.isfinite(price) or price <= 0:
         return _na(data.ticker, "insufficient data: price or ATR is not usable")
 
-    atr_stop = price - ATR_MULTIPLE * a
+    atr_stop: float | None = price - ATR_MULTIPLE * a
     low = _swing_low(df["Low"], price)
     support_stop = low * SUPPORT_BUFFER if low is not None else None
+    if support_stop is not None and support_stop <= 0:
+        support_stop = None
 
     notes: list[str] = []
     if a == 0:
         notes.append("zero volatility: ATR is 0, stop equals price")
     if support_stop is None:
         notes.append("no swing-low below price in last 60 bars; ATR stop only")
+    if atr_stop <= 0:
+        atr_stop = None
+        notes.append("ATR stop at or below zero; asset too volatile for an ATR stop")
 
-    # tighter (higher) stop, but only if it leaves more than 1 ATR of room
-    if support_stop is not None and support_stop > atr_stop and price - support_stop > a:
+    recommended: float | None
+    if atr_stop is None:
+        recommended, method = (support_stop, "support") if support_stop else (None, "n/a")
+    elif support_stop is not None and support_stop > atr_stop and price - support_stop > a:
+        # tighter (higher) stop, but only if it leaves more than 1 ATR of room
         recommended, method = support_stop, "support"
     else:
         recommended, method = atr_stop, "atr"
 
-    risk_pct = (price - recommended) / price * 100.0
+    risk_pct = None if recommended is None else (price - recommended) / price * 100.0
     return StopSuggestion(
         data.ticker,
         atr_stop,

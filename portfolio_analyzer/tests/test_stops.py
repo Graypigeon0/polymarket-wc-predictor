@@ -46,7 +46,7 @@ def test_atr_stop_is_price_minus_two_atr():
     s = suggest_stop(td)
     expected = 160.0 - 2 * atr(td.prices).iloc[-1]
     assert s.atr_stop == pytest.approx(expected)
-    assert s.support_stop is None or s.support_stop != s.atr_stop
+    assert s.support_stop is None  # steadily rising: no swing-low
 
 
 def test_support_stop_below_swing_low():
@@ -73,8 +73,8 @@ def test_recommends_tighter_when_beyond_one_atr():
 
 
 def test_falls_back_to_atr_when_support_within_one_atr():
-    s = suggest_stop(_dip(96.0))
-    assert s.support_stop == pytest.approx(96.0 * 0.99)
+    s = suggest_stop(_dip(97.0))
+    assert s.support_stop == pytest.approx(97.0 * 0.99)
     assert s.method == "atr"
     assert s.recommended == pytest.approx(s.atr_stop)
 
@@ -105,8 +105,27 @@ def test_flat_zero_volatility_does_not_crash():
 
 
 def test_crypto_wider_stop_than_stable_series():
-    rng = np.random.default_rng(0)
-    steps = rng.normal(0, 1, 120)
-    stable = _td(_df(100 + np.cumsum(steps * 0.1), half_range=0.2), "etf")
-    wild = _td(_df(100 + np.cumsum(steps * 3.0), half_range=3.0), "crypto")
-    assert suggest_stop(wild).risk_pct > suggest_stop(stable).risk_pct
+    sign = np.where(np.arange(120) % 2 == 0, 1.0, -1.0)
+    stable = _td(_df(100 + 0.5 * sign, half_range=0.2), "etf")
+    wild = _td(_df(100 + 10.0 * sign, half_range=3.0), "crypto")
+    s_stable, s_wild = suggest_stop(stable), suggest_stop(wild)
+    assert s_stable.risk_pct is not None and s_wild.risk_pct is not None
+    assert s_wild.risk_pct > s_stable.risk_pct
+
+
+def test_non_positive_atr_stop_no_swing_low_is_na():
+    s = suggest_stop(_td(_df([1.0] * 80, half_range=0.6)))  # ATR 1.2 > price / 2
+    assert s.atr_stop is None
+    assert s.recommended is None and s.risk_pct is None
+    assert s.method == "n/a"
+    assert "volatil" in s.note
+
+
+def test_non_positive_atr_stop_with_support_recommends_support():
+    s = suggest_stop(_td(_df([1.0] * 80, half_range=0.6, lows={40: 0.3})))
+    assert s.atr_stop is None
+    assert s.support_stop == pytest.approx(0.3 * 0.99)
+    assert s.method == "support"
+    assert s.recommended == pytest.approx(s.support_stop)
+    assert 0 < s.risk_pct < 100
+    assert "volatil" in s.note
