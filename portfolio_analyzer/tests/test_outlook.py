@@ -174,8 +174,10 @@ def test_nan_inputs_do_not_crash():
 
 
 class _Msg:
-    def __init__(self, content):
+    def __init__(self, content, stop_reason=None):
         self.content = content
+        if stop_reason is not None:
+            self.stop_reason = stop_reason
 
 
 class _Block:
@@ -184,16 +186,16 @@ class _Block:
 
 
 class _Stub:
-    def __init__(self, content=None, exc=None):
+    def __init__(self, content=None, exc=None, stop_reason=None):
         self.calls = []
-        self._content, self._exc = content, exc
+        self._content, self._exc, self._stop = content, exc, stop_reason
         self.messages = self
 
     def create(self, **kw):
         self.calls.append(kw)
         if self._exc:
             raise self._exc
-        return _Msg(self._content)
+        return _Msg(self._content, self._stop)
 
 
 def test_narrate_passes_only_supplied_facts():
@@ -222,3 +224,27 @@ def test_narrate_wraps_api_error_and_empty_text():
     for content in ([], None, [_Block("  ")], [object()]):
         with pytest.raises(NarrationError, match="no text"):
             narrate(o, {}, _Stub(content))
+
+
+def test_narrate_max_tokens_is_generous():
+    from portfolio_analyzer.outlook import MAX_TOKENS
+
+    o = Outlook("AAA", [], [], None)
+    stub = _Stub([_Block("ok")])
+    narrate(o, {}, stub)
+    assert MAX_TOKENS == 1500 and stub.calls[0]["max_tokens"] == 1500
+    assert set(stub.calls[0]) == {"model", "max_tokens", "system", "messages"}
+
+
+@pytest.mark.parametrize("reason", ["max_tokens", "refusal"])
+def test_narrate_bad_stop_reason_is_error_even_with_text(reason):
+    o = Outlook("AAA", [], [], None)
+    with pytest.raises(NarrationError, match=reason):
+        narrate(o, {}, _Stub([_Block("partial text")], stop_reason=reason))
+
+
+def test_narrate_end_turn_with_text_ignoring_non_text_blocks():
+    o = Outlook("AAA", [], [], None)
+    thinking = object()
+    stub = _Stub([thinking, _Block("fine")], stop_reason="end_turn")
+    assert narrate(o, {}, stub) == "fine"

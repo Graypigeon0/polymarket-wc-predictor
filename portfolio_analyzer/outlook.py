@@ -17,7 +17,7 @@ PE_ASSET_CLASSES = ("equity",)
 LOW_ASSET_CLASSES = ("equity", "etf")  # near-52-week-low bullish rule
 NEUTRAL_BULL = "No strong bullish signals"
 NEUTRAL_BEAR = "No strong bearish signals"
-MAX_TOKENS = 400
+MAX_TOKENS = 1500  # headroom for models that think before writing; prompt asks for ~120 words
 SYSTEM_PROMPT = (
     "You are a cautious market commentator. Write a short plain-English outlook for the "
     "ticker using ONLY the facts supplied. Use no figures other than those supplied; do not "
@@ -156,6 +156,9 @@ def narrate(
         )
     except Exception as exc:
         raise NarrationError(f"narration failed for {outlook.ticker}: {exc}") from exc
+    stop = getattr(resp, "stop_reason", None)
+    if stop in ("max_tokens", "refusal"):
+        raise NarrationError(f"narration for {outlook.ticker} stopped early: stop_reason={stop}")
     text = _text(getattr(resp, "content", None)).strip()
     if not text:
         raise NarrationError(f"narration for {outlook.ticker} returned no text")
