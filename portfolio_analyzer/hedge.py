@@ -13,7 +13,7 @@ OFFSET_BETA = 0.3
 CONCENTRATION_LIMIT = 0.5
 EFFECTIVE_BETA = 0.7
 PARTIAL_BETA = 1.0
-MIN_OBS = 2
+MIN_OBS = 60  # joined daily return observations needed for a meaningful beta
 # A window counts as covered when the joined data starts no later than 5 days after the window
 # start and ends no earlier than 5 days before its end (holidays/weekends). Within that
 # tolerance the stress return is computed on the available slice.
@@ -27,20 +27,24 @@ STRESS_WINDOWS = {
 _BENCH = "__benchmark__"
 
 
-def _close_returns(td: TickerData) -> pd.Series:
+def _close(td: TickerData) -> pd.Series:
     close = td.prices["Close"].astype(float)
-    close = close[~close.index.duplicated(keep="last")].sort_index()
-    return close.pct_change()
+    return close[~close.index.duplicated(keep="last")].sort_index()
 
 
 def joined_returns(
     holdings: list[Holding], data: dict[str, TickerData], benchmark: TickerData
 ) -> pd.DataFrame:
-    """Daily Close returns per holding plus benchmark, inner-joined on dates, NaN-free."""
-    cols = {h.ticker: _close_returns(data[h.ticker]) for h in holdings if h.ticker in data}
-    cols[_BENCH] = _close_returns(benchmark)
-    joined = pd.concat(cols, axis=1, join="inner")
-    return joined.replace([np.inf, -np.inf], np.nan).dropna()
+    """Daily Close returns per holding plus benchmark, NaN-free.
+
+    Prices are inner-joined on common dates FIRST and returns computed afterwards, so a
+    crypto holding's Friday->Monday return compounds its weekend moves instead of losing them.
+    """
+    cols = {h.ticker: _close(data[h.ticker]) for h in holdings if h.ticker in data}
+    cols[_BENCH] = _close(benchmark)
+    prices = pd.concat(cols, axis=1, join="inner").dropna()
+    rets = prices.pct_change(fill_method=None)
+    return rets.replace([np.inf, -np.inf], np.nan).dropna()
 
 
 def _beta(series: pd.Series, bench: pd.Series) -> float:
@@ -92,6 +96,8 @@ def _stress(
 
 
 def _offsets(rets: pd.DataFrame, weights: pd.Series, bench: pd.Series) -> list[str]:
+    if len(weights) < 2:  # offsetting is only meaningful against other holdings
+        return []
     out = []
     for t in weights.index:
         others = weights.drop(t)
@@ -127,8 +133,21 @@ def analyse_hedge(
         return f"{text}; {note}." if note else f"{text}."
 
     rets = joined_returns(held, data, benchmark)
+    starts = {t: data[t].prices.index.min() for t in tickers}
+    starts[_BENCH] = benchmark.prices.index.min()
+    starts = {("benchmark" if k == _BENCH else k): v for k, v in starts.items()}
     if len(rets) < MIN_OBS:
-        return _safe(tickers, with_note("Insufficient overlapping history to assess hedge"), conc)
+        latest = max(starts, key=lambda t: starts[t])
+        name = benchmark.ticker if latest == "benchmark" else latest
+        return _safe(
+            tickers,
+            with_note(
+                f"Insufficient overlapping history to assess hedge: {len(rets)} joined daily "
+                f"return observations, need {MIN_OBS}; limited by {name}, whose data starts "
+                f"{starts[latest].date()}"
+            ),
+            conc,
+        )
     bench = rets[_BENCH]
     var = float(bench.var())
     if not np.isfinite(var) or var <= MIN_VARIANCE:
@@ -146,9 +165,6 @@ def analyse_hedge(
         for b in tickers[i + 1 :]
         if np.isfinite(corr.loc[a, b]) and corr.loc[a, b] >= HIGH_CORR
     ]
-    starts = {t: data[t].prices.index.min() for t in tickers}
-    starts[_BENCH] = benchmark.prices.index.min()
-    starts = {("benchmark" if k == _BENCH else k): v for k, v in starts.items()}
     stress = _stress(port, bench, starts)
     avail = [s for s in stress if s.skipped_reason is None]
     wins = [s for s in avail if s.portfolio_return > s.benchmark_return]
@@ -172,6 +188,10 @@ def analyse_hedge(
         text += f"; concentration over 50% in {', '.join(flagged)}"
     if note:
         text += f"; {note}"
+    text += (
+        f". Based on {len(rets)} daily observations, "
+        f"{rets.index.min().date()} to {rets.index.max().date()}."
+    )
     return HedgeResult(
-        beta, corr, pairs, conc, _offsets(rets, weights, bench), stress, verdict, text + "."
+        beta, corr, pairs, conc, _offsets(rets, weights, bench), stress, verdict, text
     )

@@ -118,20 +118,100 @@ def test_stress_return_computed_when_covered():
     assert abs(covid.portfolio_return - ((1 + w * 0.5).prod() - 1)) < 1e-9
 
 
-def test_crypto_weekend_rows_dropped_by_inner_join():
-    days = pd.date_range("2024-01-01", periods=60, freq="D")  # includes weekends
-    rng = np.random.default_rng(4)
-    btc = _td(
-        "BTC-USD", pd.Series(100 * np.cumprod(1 + rng.normal(0, 0.02, 60)), index=days), "crypto"
-    )
-    wk = pd.bdate_range("2024-01-01", "2024-02-29")
-    spy = _td("SPY", pd.Series(100 * np.cumprod(1 + rng.normal(0, 0.01, len(wk))), index=wk), "etf")
+def _weekend_btc_and_bench(weeks=100, seed=4):
+    """BTC moves only on Sat/Sun; the weekday benchmark's Monday return tracks that move."""
+    rng = np.random.default_rng(seed)
+    days = pd.date_range("2022-01-03", periods=weeks * 7, freq="D")  # starts on a Monday
+    btc_r = pd.Series(0.0, index=days)
+    wknd = days[days.weekday >= 5]
+    btc_r[wknd] = rng.normal(0, 0.03, len(wknd))
+    btc_close = 100 * (1 + btc_r).cumprod()
+    bdays = days[days.weekday < 5]
+    bench_r = pd.Series(rng.normal(0, 0.0005, len(bdays)), index=bdays)
+    for monday in bdays[bdays.weekday == 0][1:]:
+        weekend = btc_close[monday] / btc_close[monday - pd.Timedelta(days=3)] - 1
+        bench_r[monday] = 0.5 * weekend
+    bench_close = 100 * (1 + bench_r).cumprod()
+    return _td("BTC-USD", btc_close, "crypto"), _td("SPY", bench_close, "etf")
+
+
+def test_crypto_weekend_moves_compounded_into_monday_return():
     from portfolio_analyzer.hedge import joined_returns
 
+    btc, spy = _weekend_btc_and_bench()
     j = joined_returns([Holding("BTC-USD", 1.0)], {"BTC-USD": btc}, spy)
     assert not j.isna().any().any()
-    assert len(j) == len(wk) - 1
     assert all(d.weekday() < 5 for d in j.index)
+    close = btc.prices["Close"]
+    monday = pd.Timestamp("2022-01-17")
+    friday = pd.Timestamp("2022-01-14")
+    expected = close[monday] / close[friday] - 1  # Fri->Mon = Sat * Sun * Mon moves
+    assert abs(expected) > 1e-3
+    assert abs(j.loc[monday, "BTC-USD"] - expected) < 1e-12
+    # a weekday-only return is NOT the weekend-less Sun->Mon move
+    sun_mon = close[monday] / close[monday - pd.Timedelta(days=1)] - 1
+    assert abs(j.loc[monday, "BTC-USD"] - sun_mon) > 1e-4
+
+
+def test_weekend_only_crypto_has_nonzero_beta():
+    btc, spy = _weekend_btc_and_bench()
+    res = analyse_hedge([Holding("BTC-USD", 1.0)], {"BTC-USD": btc}, spy)
+    assert res.stress != []
+    assert abs(res.beta) > 0.5
+
+
+def test_holiday_mismatch_uses_common_dates_price_change():
+    from portfolio_analyzer.hedge import joined_returns
+
+    idx = pd.bdate_range("2023-01-02", periods=80)
+    rng = np.random.default_rng(1)
+    bench_close = pd.Series(100 * np.cumprod(1 + rng.normal(0, 0.01, 80)), index=idx)
+    h_close = pd.Series(100 * np.cumprod(1 + rng.normal(0, 0.01, 80)), index=idx)
+    bench = _td("SPY", bench_close.drop(idx[10]), "etf")  # benchmark market closed that day
+    h = _td("H", h_close, "etf")
+    j = joined_returns([Holding("H", 1.0)], {"H": h}, bench)
+    assert idx[10] not in j.index
+    assert abs(j.loc[idx[11], "H"] - (h_close[idx[11]] / h_close[idx[9]] - 1)) < 1e-12
+
+
+def test_59_observations_is_unavailable_and_names_limiting_ticker():
+    # 61 prices -> 60 returns for the benchmark; NEW-USD starts later giving only 59 joined
+    r = _rets(n=400, start="2023-01-02")
+    bench = _td("SPY", _from_rets(r), "etf")
+    tail = _from_rets(_rets(n=60, seed=3, start="2024-01-01"))  # 60 prices -> 59 returns
+    new = _td("NEW-USD", tail, "etf")
+    res = analyse_hedge([Holding("NEW-USD", 1.0)], {"NEW-USD": new}, bench)
+    assert res.stress == []
+    assert "NEW-USD" in res.reason
+    assert str(tail.index.min().date()) in res.reason
+    assert "59" in res.reason
+
+
+def test_60_observations_is_available():
+    r = _rets(n=400, start="2023-01-02")
+    bench = _td("SPY", _from_rets(r), "etf")
+    tail = _from_rets(_rets(n=61, seed=3, start="2024-01-01"))  # 61 prices -> 60 returns
+    new = _td("NEW-USD", tail, "etf")
+    res = analyse_hedge([Holding("NEW-USD", 1.0)], {"NEW-USD": new}, bench)
+    assert res.stress != []
+    assert "Based on 60 daily observations" in res.reason
+
+
+def test_reason_includes_observation_count_and_date_range():
+    r = _rets(n=300, start="2023-01-02")
+    bench = _td("SPY", _from_rets(r), "etf")
+    h = _td("H", _from_rets(r * 0.9), "etf")
+    res = analyse_hedge([Holding("H", 1.0)], {"H": h}, bench)
+    first, last = r.index[1].date(), r.index[-1].date()
+    assert f"Based on 299 daily observations, {first} to {last}." in res.reason
+
+
+def test_single_holding_never_listed_as_its_own_offset():
+    r = _rets()
+    bench = _td("SPY", _from_rets(r), "etf")
+    low = _td("LOW", _from_rets(r * 0.1 + _rets(seed=8) * 0.5), "etf")
+    res = analyse_hedge([Holding("LOW", 1.0)], {"LOW": low}, bench)
+    assert res.offsets == []
 
 
 def test_verdict_effective():
@@ -195,9 +275,9 @@ def test_all_holdings_missing_is_safe():
 
 
 def test_zero_variance_benchmark_is_safe():
-    idx = pd.bdate_range("2023-01-02", periods=50)
+    idx = pd.bdate_range("2023-01-02", periods=100)
     flat = _td("FLAT", pd.Series(100.0, index=idx), "etf")
-    h = _td("H", _from_rets(_rets(n=50, start="2023-01-02")), "etf")
+    h = _td("H", _from_rets(_rets(n=100, start="2023-01-02")), "etf")
     res = analyse_hedge([Holding("H", 1.0)], {"H": h}, flat)
     assert res.verdict == "none"
     assert res.offsets == []
@@ -226,8 +306,11 @@ def test_low_beta_alone_makes_offset():
     r = _rets()
     bench = _td("SPY", _from_rets(r), "etf")
     low = _td("LOW", _from_rets(r * 0.1 + _rets(seed=8) * 0.5), "etf")
-    res = analyse_hedge([Holding("LOW", 1.0)], {"LOW": low}, bench)
-    assert res.offsets == ["LOW"]
+    high = _td("HIGH", _from_rets(r * 1.2 + _rets(seed=9) * 0.1), "etf")
+    res = analyse_hedge(
+        [Holding("LOW", 0.5), Holding("HIGH", 0.5)], {"LOW": low, "HIGH": high}, bench
+    )
+    assert "LOW" in res.offsets and "HIGH" not in res.offsets
 
 
 def test_high_beta_losing_windows_is_none():
