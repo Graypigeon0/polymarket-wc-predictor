@@ -49,3 +49,6 @@ logs/
 
 # Docker
 docker-compose.override.yml
+
+# Portfolio analyzer cache
+.cache/
