@@ -167,3 +167,18 @@ def test_warnings_in_report():
     md = _render({"AAA": _analysis()}, warns=["Weights sum to 90%, normalised to 100%"])
     assert "## Warnings" in md
     assert "Weights sum to 90%" in md
+
+
+def test_stress_windows_use_readable_labels_with_fallback():
+    h = _hedge(
+        stress=[
+            StressResult("covid_2020", -0.1, -0.3, None),
+            StressResult("bear_2022", None, None, "no history"),
+            StressResult("custom_x", 0.0, 0.0, None),
+        ]
+    )
+    md = _render({"AAA": _analysis()}, hedge=h)
+    assert "COVID crash (19 Feb-23 Mar 2020): portfolio -10.0%" in md
+    assert "2022 bear market (3 Jan-12 Oct 2022): skipped (no history)" in md
+    assert "custom_x: portfolio" in md
+    assert "covid_2020" not in md

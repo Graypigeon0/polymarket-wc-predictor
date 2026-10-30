@@ -3,7 +3,8 @@ from __future__ import annotations
 import math
 import os
 import statistics
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -52,22 +53,55 @@ def sector_median_pe(universe: dict[str, TickerData], sector: Any) -> float | No
     return float(statistics.median(pes))
 
 
-def _fetch_universe(tickers: list[str], warnings: list[str]) -> dict[str, TickerData]:
+def fetch_universe(
+    tickers: list[str],
+    fetch_fn: Callable[[str], TickerData],
+    on_progress: Callable[[int, int], None] | None = None,
+    workers: int = UNIVERSE_WORKERS,
+) -> dict[str, TickerData]:
+    """Fetch tickers on a thread pool, tolerating per-ticker failures.
+
+    `on_progress(done, total)` is called after each ticker. On KeyboardInterrupt the queued
+    fetches are cancelled and the interrupt is re-raised.
+    """
     out: dict[str, TickerData] = {}
 
-    def one(t: str) -> tuple[str, TickerData | None]:
+    def one(t: str) -> TickerData | None:
         try:
-            return t, fetch(t)
+            return fetch_fn(t)
         except Exception:  # per-ticker failures are tolerated
-            return t, None
+            return None
 
-    with ThreadPoolExecutor(max_workers=UNIVERSE_WORKERS) as pool:
-        for t, td in pool.map(one, tickers):
+    pool = ThreadPoolExecutor(max_workers=workers)
+    try:
+        futures = {pool.submit(one, t): t for t in tickers}
+        for done, fut in enumerate(as_completed(futures), start=1):
+            td = fut.result()
             if td is not None:
-                out[t] = td
-    failed = len(tickers) - len(out)
+                out[futures[fut]] = td
+            if on_progress is not None:
+                on_progress(done, len(tickers))
+    except BaseException:
+        pool.shutdown(wait=False, cancel_futures=True)
+        raise
+    pool.shutdown(wait=True)
+    return out
+
+
+def _fetch_universe(tickers: list[str], warnings: list[str]) -> dict[str, TickerData]:
+    if not tickers:
+        return {}
+    total = len(tickers)
+    with Console(stderr=True).status(f"Fetching universe 0/{total}") as status:
+
+        def progress(done: int, total: int) -> None:
+            status.update(f"Fetching universe {done}/{total}")
+
+        # look up the module-level `fetch` at call time so tests can replace it
+        out = fetch_universe(tickers, lambda t: fetch(t), progress)
+    failed = total - len(out)
     if failed:
-        warnings.append(f"Universe: {failed} of {len(tickers)} tickers could not be fetched")
+        warnings.append(f"Universe: {failed} of {total} tickers could not be fetched")
     return out
 
 
@@ -124,12 +158,25 @@ def main(
 def run(
     tickers: list[str], benchmark: str, report: Path | None, narrate_on: bool, universe: str
 ) -> None:
+    try:
+        _run(tickers, benchmark, report, narrate_on, universe)
+    except KeyboardInterrupt:
+        typer.echo("Interrupted.", err=True)
+        raise typer.Exit(130) from None
+
+
+def _run(
+    tickers: list[str], benchmark: str, report: Path | None, narrate_on: bool, universe: str
+) -> None:
     console = Console()
     try:
         holdings, warnings = parse_holdings(tickers)
     except ValueError as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(EXIT_USAGE) from None
+    if universe.strip().lower() != "sp500" and not Path(universe).is_file():
+        typer.echo(f"Error: universe file not found: {universe}", err=True)
+        raise typer.Exit(EXIT_USAGE)
     client = _make_client() if narrate_on else None
     for w in warnings:
         typer.echo(f"Warning: {w}", err=True)
@@ -151,6 +198,10 @@ def run(
             + next(iter(errors.values())),
             err=True,
         )
+        raise typer.Exit(1)
+    if not fetched:
+        detail = "; ".join(f"{t}: {m}" for t, m in errors.items())
+        typer.echo(f"Error: No holdings could be analysed. {detail}", err=True)
         raise typer.Exit(1)
 
     bench: TickerData | None = fetched.get(benchmark.upper())
@@ -209,8 +260,13 @@ def run(
         warnings=warnings,
     )
     console.print(Markdown(md))
+    write_failed = False
     if report is not None:
-        report.write_text(md, encoding="utf-8")
-        typer.echo(f"Report written to {report}", err=True)
-    if not analyses:
+        try:
+            report.write_text(md, encoding="utf-8")
+            typer.echo(f"Report written to {report}", err=True)
+        except OSError as exc:
+            typer.echo(f"Error: could not write report to {report}: {exc}", err=True)
+            write_failed = True
+    if write_failed or not analyses:
         raise typer.Exit(1)

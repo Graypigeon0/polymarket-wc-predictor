@@ -15,6 +15,10 @@ from portfolio_analyzer.models import (
 
 DISCLAIMER = "Not financial advice. Signals are heuristics, not predictions."
 NON_EQUITY_VALUATION = "valuation n/a (no earnings/cash flow)"
+STRESS_LABELS = {
+    "covid_2020": "COVID crash (19 Feb-23 Mar 2020)",
+    "bear_2022": "2022 bear market (3 Jan-12 Oct 2022)",
+}
 NO_CANDIDATES = "No candidates found (fundamentals unavailable or none passed the filters)"
 
 
@@ -130,11 +134,12 @@ def _hedge_section(hedge: HedgeResult | None) -> list[str]:
     lines.append(f"- Offsetting holdings: {', '.join(hedge.offsets) if hedge.offsets else 'none'}")
     lines += ["", "**Stress tests**"]
     for s in hedge.stress:
+        name = STRESS_LABELS.get(s.name, s.name)
         if s.skipped_reason is not None:
-            lines.append(f"- {s.name}: skipped ({s.skipped_reason})")
+            lines.append(f"- {name}: skipped ({s.skipped_reason})")
         else:
             lines.append(
-                f"- {s.name}: portfolio {s.portfolio_return:+.1%} vs benchmark "
+                f"- {name}: portfolio {s.portfolio_return:+.1%} vs benchmark "
                 f"{s.benchmark_return:+.1%}"
             )
     return [*lines, ""]

@@ -215,3 +215,72 @@ def test_sector_median_pe_none_when_few_peers_or_unknown_sector():
     assert cli.sector_median_pe(u, None) is None
     assert cli.sector_median_pe(u, "") is None
     assert cli.sector_median_pe(u, "Energy") is None
+
+
+def test_fetch_universe_reports_progress_and_tolerates_failures():
+    seen = []
+
+    def fn(t):
+        if t == "BAD":
+            raise DataError("x")
+        return _td(t)
+
+    out = cli.fetch_universe(["A", "BAD", "B"], fn, lambda d, n: seen.append((d, n)), workers=2)
+    assert set(out) == {"A", "B"}
+    assert sorted(seen) == [(1, 3), (2, 3), (3, 3)]
+
+
+def test_fetch_universe_interrupt_cancels_and_reraises():
+    def fn(t):
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        cli.fetch_universe(["A", "B", "C"], fn, workers=1)
+
+
+def test_cli_interrupt_during_universe_exits_130(monkeypatch, universe_file):
+    base = _fake_fetch()
+
+    def fake(ticker, **kw):
+        if ticker.startswith("U"):
+            raise KeyboardInterrupt
+        return base(ticker)
+
+    monkeypatch.setattr(cli, "fetch", fake)
+    res = runner.invoke(cli.app, ["AAA", "--universe", universe_file])
+    assert res.exit_code == 130
+    assert "Interrupted" in res.output
+    assert "Traceback" not in res.output
+
+
+def test_no_holdings_analysed_skips_universe_fetch(monkeypatch, universe_file):
+    calls = []
+
+    def fake(ticker, **kw):
+        calls.append(ticker)
+        raise DataError(f"no data {ticker}")
+
+    monkeypatch.setattr(cli, "fetch", fake)
+    res = runner.invoke(cli.app, ["AAA", "BBB", "--universe", universe_file])
+    assert res.exit_code == 1
+    assert "No holdings could be analysed" in res.output
+    assert "no data AAA" in res.output
+    assert not any(t.startswith("U") for t in calls)
+
+
+def test_missing_universe_file_is_usage_error(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(cli, "fetch", lambda *a, **k: calls.append(a))
+    res = runner.invoke(cli.app, ["AAA", "--universe", str(tmp_path / "nope.txt")])
+    assert res.exit_code == 2
+    assert "universe file not found" in res.output
+    assert calls == []
+
+
+def test_bad_report_path_still_prints_report_and_exits_1(monkeypatch, tmp_path, universe_file):
+    monkeypatch.setattr(cli, "fetch", _fake_fetch())
+    bad = tmp_path / "missing_dir" / "r.md"
+    res = runner.invoke(cli.app, ["AAA", "--universe", universe_file, "--report", str(bad)])
+    assert res.exit_code == 1
+    assert "could not write report" in res.output
+    assert "Portfolio analysis" in res.output
