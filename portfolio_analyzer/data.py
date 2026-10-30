@@ -13,6 +13,7 @@ from typing import Any
 
 import pandas as pd
 import yfinance as yf
+from yfinance import exceptions as yf_exc
 
 from portfolio_analyzer.models import AssetClass, TickerData
 
@@ -36,6 +37,10 @@ _QUOTE_TYPES: dict[str, AssetClass] = {
 
 class DataError(Exception):
     """Raised when market data is empty, invalid or unavailable."""
+
+
+class DataProviderError(DataError):
+    """Raised when the data provider (Yahoo Finance) cannot be reached or refuses the request."""
 
 
 def classify(quote_type: str, ticker: str) -> AssetClass:
@@ -102,9 +107,15 @@ def fetch_ticker(
 
     try:
         tk = yf.Ticker(ticker)
-        raw = tk.history(start=start, auto_adjust=True)
+        # raise_errors=True: by default yfinance swallows network failures and returns an
+        # empty frame, indistinguishable from a delisted symbol.
+        raw = tk.history(start=start, auto_adjust=True, raise_errors=True)
+    except (yf_exc.YFTickerMissingError, yf_exc.YFPricesMissingError, ValueError) as exc:
+        raise DataError(f"No price data returned for {ticker!r}: {exc}") from exc
     except Exception as exc:
-        raise DataError(f"Download failed for {ticker!r}: {exc}") from exc
+        raise DataProviderError(
+            f"Could not reach Yahoo Finance while fetching {ticker!r}: {type(exc).__name__}: {exc}"
+        ) from exc
     prices = _normalise(raw, ticker)
 
     # Quote type: the chart metadata needs no crumb; Ticker.info may be 401/rate-limited.

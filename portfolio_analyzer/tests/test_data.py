@@ -7,7 +7,13 @@ import pandas as pd
 import pytest
 
 from portfolio_analyzer import data
-from portfolio_analyzer.data import DataError, annualisation_factor, classify, fetch_ticker
+from portfolio_analyzer.data import (
+    DataError,
+    DataProviderError,
+    annualisation_factor,
+    classify,
+    fetch_ticker,
+)
 
 COLS = ["Open", "High", "Low", "Close", "Volume"]
 
@@ -22,8 +28,10 @@ def _raw(n: int = 5, tz: bool = True) -> pd.DataFrame:
 
 class FakeTicker:
     calls: ClassVar[int] = 0
+    history_exc: ClassVar[Exception | None] = None
+    info_exc: ClassVar[Exception | None] = None
     frame: ClassVar[pd.DataFrame] = _raw()
-    info: ClassVar[dict] = {"quoteType": "EQUITY", "trailingPE": 20.0, "marketCap": 5}
+    info_data: ClassVar[dict] = {"quoteType": "EQUITY", "trailingPE": 20.0, "marketCap": 5}
     meta: ClassVar[dict] = {"instrumentType": "EQUITY"}
 
     def __init__(self, ticker: str) -> None:
@@ -31,7 +39,15 @@ class FakeTicker:
 
     def history(self, **kwargs):
         type(self).calls += 1
+        if type(self).history_exc is not None:
+            raise type(self).history_exc
         return type(self).frame.copy()
+
+    @property
+    def info(self):
+        if type(self).info_exc is not None:
+            raise type(self).info_exc
+        return type(self).info_data
 
     @property
     def history_metadata(self):
@@ -43,8 +59,10 @@ def fake(request, monkeypatch):
     if request.node.get_closest_marker("network"):
         return FakeTicker
     FakeTicker.calls = 0
+    FakeTicker.history_exc = None
+    FakeTicker.info_exc = None
     FakeTicker.frame = _raw()
-    FakeTicker.info = {"quoteType": "EQUITY", "trailingPE": 20.0, "marketCap": 5}
+    FakeTicker.info_data = {"quoteType": "EQUITY", "trailingPE": 20.0, "marketCap": 5}
     FakeTicker.meta = {"instrumentType": "EQUITY"}
     monkeypatch.setattr(data.yf, "Ticker", FakeTicker)
     return FakeTicker
@@ -104,3 +122,41 @@ def test_live_fetch_spy(tmp_path):
     assert len(td.prices) >= 200
     assert list(td.prices.columns) == COLS
     assert td.asset_class == "etf"
+
+
+def test_provider_outage_is_distinct_from_missing_ticker(tmp_path, fake):
+    fake.history_exc = ConnectionError("proxy refused tunnel")
+    with pytest.raises(DataProviderError) as outage:
+        fetch_ticker("AAA", cache_dir=tmp_path)
+    assert "Could not reach Yahoo Finance" in str(outage.value)
+    assert "proxy refused tunnel" in str(outage.value)
+
+    fake.history_exc = None
+    fake.frame = pd.DataFrame(columns=COLS)
+    with pytest.raises(DataError) as empty:
+        fetch_ticker("AAA", cache_dir=tmp_path)
+    assert not isinstance(empty.value, DataProviderError)
+    assert "No price data" in str(empty.value)
+    assert "Could not reach" not in str(empty.value)
+
+
+def test_yfinance_missing_ticker_error_is_plain_dataerror(tmp_path, fake):
+    from yfinance import exceptions as yf_exc
+
+    fake.history_exc = yf_exc.YFTzMissingError("ZZZ")
+    with pytest.raises(DataError) as err:
+        fetch_ticker("ZZZ", cache_dir=tmp_path)
+    assert not isinstance(err.value, DataProviderError)
+
+
+def test_quote_type_falls_back_to_info(tmp_path, fake):
+    fake.meta = {}
+    fake.info_data = {"quoteType": "CRYPTOCURRENCY"}
+    assert fetch_ticker("XYZ", cache_dir=tmp_path).asset_class == "crypto"
+
+
+def test_info_failure_gives_empty_fundamentals(tmp_path, fake):
+    fake.info_exc = RuntimeError("401 Invalid Crumb")
+    td = fetch_ticker("AAA", cache_dir=tmp_path)
+    assert td.fundamentals == {}
+    assert len(td.prices) == 5
