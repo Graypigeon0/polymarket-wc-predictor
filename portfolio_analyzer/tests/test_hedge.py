@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import pytest
 
 from portfolio_analyzer.hedge import analyse_hedge
 from portfolio_analyzer.models import Holding, TickerData
@@ -111,7 +112,8 @@ def test_stress_return_computed_when_covered():
     res = analyse_hedge([Holding("H", 1.0)], {"H": h}, bench)
     covid = res.stress[0]
     assert covid.skipped_reason is None
-    w = r["2020-02-19":"2020-03-23"]
+    idx = r.index
+    w = r[(idx > "2020-02-19") & (idx <= "2020-03-23")]  # close(start) -> close(end)
     assert abs(covid.benchmark_return - ((1 + w).prod() - 1)) < 1e-9
     assert abs(covid.portfolio_return - ((1 + w * 0.5).prod() - 1)) < 1e-9
 
@@ -159,4 +161,90 @@ def test_insufficient_overlap_is_safe():
     bench = _td("SPY", _from_rets(r), "etf")
     res = analyse_hedge([Holding("SPY", 1.0)], {"SPY": bench}, bench)
     assert res.verdict == "none"
-    assert "insufficient overlapping history" in res.reason
+    assert "insufficient overlapping history" in res.reason.lower()
+
+
+@pytest.mark.parametrize("seed", range(20))
+def test_benchmark_clone_verdict_none_across_seeds(seed):
+    r = _rets(seed=seed)
+    bench = _td("SPY", _from_rets(r), "etf")
+    res = analyse_hedge([Holding("SPY", 1.0)], {"SPY": bench}, bench)
+    assert res.beta == 1.0 and res.verdict == "none"
+    clone2 = _td("QQQ", _from_rets(r), "etf")
+    res = analyse_hedge(
+        [Holding("SPY", 0.3), Holding("QQQ", 0.7)], {"SPY": bench, "QQQ": clone2}, bench
+    )
+    assert res.beta == 1.0 and res.verdict == "none"
+
+
+def test_missing_holding_renormalised_and_named():
+    r = _rets()
+    bench = _td("SPY", _from_rets(r), "etf")
+    res = analyse_hedge([Holding("SPY", 0.6), Holding("MISSING", 0.4)], {"SPY": bench}, bench)
+    assert res.beta == 1.0
+    assert res.verdict == "none"
+    assert "MISSING" in res.reason and "no data" in res.reason
+    assert abs(sum(res.concentration.values()) - 1.0) < 1e-9
+
+
+def test_all_holdings_missing_is_safe():
+    bench = _td("SPY", _from_rets(_rets()), "etf")
+    res = analyse_hedge([Holding("X", 1.0)], {}, bench)
+    assert res.verdict == "none"
+    assert "X" in res.reason
+
+
+def test_zero_variance_benchmark_is_safe():
+    idx = pd.bdate_range("2023-01-02", periods=50)
+    flat = _td("FLAT", pd.Series(100.0, index=idx), "etf")
+    h = _td("H", _from_rets(_rets(n=50, start="2023-01-02")), "etf")
+    res = analyse_hedge([Holding("H", 1.0)], {"H": h}, flat)
+    assert res.verdict == "none"
+    assert res.offsets == []
+    assert "benchmark has no variance over the overlapping history" in res.reason.lower()
+
+
+def test_low_beta_no_covered_window_is_partial_with_withheld_note():
+    r = _rets(n=300, start="2023-01-02")
+    bench = _td("SPY", _from_rets(r), "etf")
+    h = _td("H", _from_rets(r * 0.4), "etf")
+    res = analyse_hedge([Holding("H", 1.0)], {"H": h}, bench)
+    assert res.verdict == "partial"
+    assert "withheld" in res.reason and "no stress window could be tested" in res.reason
+
+
+def test_skipped_reason_names_latest_starting_ticker():
+    r = _rets(n=1000)
+    bench = _td("SPY", _from_rets(r), "etf")
+    short = _td("NEW", _from_rets(r.iloc[-300:] * 0.5), "etf")
+    res = analyse_hedge([Holding("NEW", 1.0)], {"NEW": short}, bench)
+    assert all("NEW" in s.skipped_reason for s in res.stress)
+    assert str(short.prices.index.min().date()) in res.stress[0].skipped_reason
+
+
+def test_low_beta_alone_makes_offset():
+    r = _rets()
+    bench = _td("SPY", _from_rets(r), "etf")
+    low = _td("LOW", _from_rets(r * 0.1 + _rets(seed=8) * 0.5), "etf")
+    res = analyse_hedge([Holding("LOW", 1.0)], {"LOW": low}, bench)
+    assert res.offsets == ["LOW"]
+
+
+def test_high_beta_losing_windows_is_none():
+    r = _rets(n=1000)
+    for lo, hi in (("2020-02-19", "2020-03-23"), ("2022-01-03", "2022-10-12")):
+        r.loc[lo:hi] -= 0.01
+    bench = _td("SPY", _from_rets(r), "etf")
+    h = _td("H", _from_rets(r * 1.5), "etf")
+    res = analyse_hedge([Holding("H", 1.0)], {"H": h}, bench)
+    assert res.beta > 1.0
+    assert res.verdict == "none"
+
+
+def test_mutually_anticorrelated_holdings_both_offsets():
+    r = _rets()
+    bench = _td("SPY", _from_rets(_rets(seed=11)), "etf")
+    a = _td("A", _from_rets(r))
+    b = _td("B", _from_rets(-r))
+    res = analyse_hedge([Holding("A", 0.5), Holding("B", 0.5)], {"A": a, "B": b}, bench)
+    assert set(res.offsets) == {"A", "B"}
