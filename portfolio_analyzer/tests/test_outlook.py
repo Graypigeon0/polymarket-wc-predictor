@@ -79,8 +79,68 @@ def test_52w_proximity_from_fundamentals_and_prices():
     f = {"fiftyTwoWeekLow": 10.0, "fiftyTwoWeekHigh": 102.0}
     assert any("52-week high" in b for b in build_outlook(_td(fundamentals=f), _c(), _s()).bearish)
     c = np.linspace(200, 100, 260)  # ends at its 252-row low
-    o = build_outlook(_td("crypto", prices=_prices(c)), _c(), _s())
+    o = build_outlook(_td("equity", prices=_prices(c)), _c(), _s())
     assert any("52-week low" in b for b in o.bullish)
+
+
+def test_low_bullet_only_for_equity_and_etf():
+    f = {"fiftyTwoWeekLow": 98.0, "fiftyTwoWeekHigh": 300.0}
+    for ac in ("equity", "etf"):
+        assert any("52-week low" in b for b in build_outlook(_td(ac, f), _c(), _s()).bullish)
+    for ac in ("crypto", "commodity"):
+        assert not any("52-week" in b for b in build_outlook(_td(ac, f), _c(), _s()).bullish)
+    f = {"fiftyTwoWeekLow": 10.0, "fiftyTwoWeekHigh": 102.0}
+    for ac in ("crypto", "commodity"):
+        assert any("52-week high" in b for b in build_outlook(_td(ac, f), _c(), _s()).bearish)
+
+
+def test_short_series_gives_no_price_derived_52w():
+    c = np.linspace(200, 100, 100)  # at its own range low, but only 100 bars
+    o = build_outlook(_td(prices=_prices(c)), _c(), _s())
+    assert not any("52-week" in b for b in o.bullish + o.bearish)
+    c = np.linspace(100, 200, 40)  # < 60 bars, at its high
+    o = build_outlook(_td(prices=_prices(c)), _c(), _s())
+    assert not any("52-week" in b for b in o.bullish + o.bearish)
+
+
+def test_narrow_range_emits_only_nearer_extreme():
+    f = {"fiftyTwoWeekLow": 100 / 1.02, "fiftyTwoWeekHigh": 100 / 0.98}
+    both = build_outlook(_td(fundamentals=f), _c(), _s())  # price 100: tie
+    assert not any("52-week" in b for b in both.bullish + both.bearish)
+    f = {"fiftyTwoWeekLow": 99.0, "fiftyTwoWeekHigh": 103.0}  # nearer the low
+    o = build_outlook(_td(fundamentals=f), _c(), _s())
+    assert any("52-week low" in b for b in o.bullish)
+    assert not any("52-week" in b for b in o.bearish)
+
+
+def test_price_beyond_stale_extreme_is_stated_honestly():
+    f = {"fiftyTwoWeekLow": 110.0, "fiftyTwoWeekHigh": 300.0}
+    o = build_outlook(_td(fundamentals=f), _c(), _s())
+    assert any("at/below its 52-week low 110.00" in b for b in o.bullish)
+    f = {"fiftyTwoWeekLow": 10.0, "fiftyTwoWeekHigh": 90.0}
+    o = build_outlook(_td(fundamentals=f), _c(), _s())
+    assert any("at/above its 52-week high 90.00" in b for b in o.bearish)
+
+
+def test_sources_not_mixed():
+    c = np.linspace(200, 100, 260)  # price-derived would flag the low
+    o = build_outlook(_td(fundamentals={"fiftyTwoWeekLow": 50.0}, prices=_prices(c)), _c(), _s())
+    # fundamentals incomplete -> both from prices (low 100, high 200) -> low bullet
+    assert any("52-week low 100.00" in b for b in o.bullish)
+
+
+def test_boundaries_are_exclusive_or_inclusive_as_specified():
+    for rsi in (30.0, 70.0):
+        o = build_outlook(_td(), _c(rsi=rsi), _s())
+        assert o.bullish == ["No strong bullish signals"] and o.bearish == ["No strong bearish signals"]
+    o = build_outlook(_td(), _c(), _s(risk=10.0))
+    assert o.bearish == ["No strong bearish signals"]
+    o = build_outlook(_td(fundamentals={"trailingPE": 20.0}), _c(), _s(), sector_median_pe=20.0)
+    assert o.bullish == ["No strong bullish signals"] and o.bearish == ["No strong bearish signals"]
+    f = {"fiftyTwoWeekLow": 100.0 / 1.05, "fiftyTwoWeekHigh": 400.0}  # exactly 5% above low
+    assert any("52-week low" in b for b in build_outlook(_td(fundamentals=f), _c(), _s()).bullish)
+    f = {"fiftyTwoWeekLow": 10.0, "fiftyTwoWeekHigh": 100.0 / 0.95}  # exactly 5% below high
+    assert any("52-week high" in b for b in build_outlook(_td(fundamentals=f), _c(), _s()).bearish)
 
 
 def test_pe_bullets_equity_only():
@@ -137,12 +197,14 @@ class _Stub:
 
 
 def test_narrate_passes_only_supplied_facts():
-    o = Outlook("AAA", ["RSI 24.3 oversold"], ["No strong bearish signals"], None)
+    o = Outlook("ZZZZ", ["secret bullet 9876.5"], ["secret bear 4321.0"], "old ZZZZ")
     stub = _Stub([_Block("ok")])
-    narrate(o, {"ticker": "AAA", "rsi": 24.3, "bullish": o.bullish}, stub)
+    narrate(o, {"ticker": "AAA", "rsi": 24.3}, stub)
     kw = stub.calls[0]
     blob = str(kw["messages"])
-    assert "24.3" in blob and "AAA" in blob and "ZZZZ" not in blob
+    assert "24.3" in blob and "AAA" in blob
+    for leak in ("ZZZZ", "9876.5", "4321.0", "secret"):
+        assert leak not in blob
     assert "not financial advice" in kw["system"].lower()
     assert "120" in kw["system"] and "figures" in kw["system"].lower()
     assert kw["model"] == "claude-sonnet-5-5"
@@ -153,9 +215,10 @@ def test_narrate_returns_text():
     assert narrate(o, {"x": 1}, _Stub([_Block("hello "), _Block("world")])) == "hello world"
 
 
-def test_narrate_wraps_api_error_and_odd_content():
+def test_narrate_wraps_api_error_and_empty_text():
     o = Outlook("AAA", [], [], None)
     with pytest.raises(NarrationError, match="boom"):
         narrate(o, {}, _Stub(exc=RuntimeError("boom")))
-    assert narrate(o, {}, _Stub([])) == ""
-    assert narrate(o, {}, _Stub(None)) == ""
+    for content in ([], None, [_Block("  ")], [object()]):
+        with pytest.raises(NarrationError, match="no text"):
+            narrate(o, {}, _Stub(content))
