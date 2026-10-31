@@ -35,7 +35,7 @@ dependencies = [
     "beautifulsoup4>=4.12",
     "lxml>=5.2",
     "feedparser>=6.0",
-    "selectolax>=0.3",
+    "selectolax>=0.3,<1.0",
 
     # LLM clients
     "google-genai>=0.3",
