@@ -18,7 +18,7 @@ jobs:
         run: |
           pip install -e ".[dev]"
       - name: Lint
-        run: ruff check backend
+        run: ruff check backend portfolio_analyzer
       - name: Tests
         env:
           SUPABASE_URL: http://placeholder
