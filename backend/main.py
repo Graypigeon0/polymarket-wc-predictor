@@ -29,7 +29,7 @@ log = structlog.get_logger()
 
 async def poll_news() -> None:
     """Pull latest RSS + Reddit, classify with Gemini, apply rating deltas."""
-    from backend.ingestion.news import rss, reddit
+    from backend.ingestion.news import reddit, rss
     from backend.models import llm_context
 
     log.info("poll_news.start")
@@ -178,6 +178,7 @@ def backfill_all() -> None:
 def db_test() -> None:
     """Diagnostic: insert a test team into Supabase and read it back."""
     import uuid as _uuid
+
     from backend.db.client import get_client
 
     db = get_client()

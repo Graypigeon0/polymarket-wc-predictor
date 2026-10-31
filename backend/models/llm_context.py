@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import structlog
@@ -201,7 +201,7 @@ NEWS:
         attack_delta=a_delta,
         defense_delta=d_delta,
         confidence=float(data.get("confidence", 0.5)),
-        expires_at=datetime.now(timezone.utc) + timedelta(hours=hours),
+        expires_at=datetime.now(UTC) + timedelta(hours=hours),
         reasoning=data.get("reasoning", ""),
     )
 

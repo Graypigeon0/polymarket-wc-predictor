@@ -18,7 +18,7 @@ Aggregate over all resolved markets gives total realised P&L, hit rate, ROI.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -88,7 +88,7 @@ async def refresh_resolutions() -> dict[str, int]:
                 db.table("polymarket_markets").update({
                     "resolved":           True,
                     "resolution_outcome": resolution,
-                    "resolved_at":        datetime.now(timezone.utc).isoformat(),
+                    "resolved_at":        datetime.now(UTC).isoformat(),
                 }).eq("id", yes_token).execute()
                 updated += 1
                 log.info("outcomes.resolved",
@@ -131,8 +131,11 @@ async def compute_pnl() -> dict[str, Any]:
                .execute()).data or []
     m_by_id = {m["id"]: m for m in markets}
 
-    n_resolved = 0; n_pending = 0; n_won = 0
-    total_staked = 0.0; total_profit = 0.0
+    n_resolved = 0
+    n_pending = 0
+    n_won = 0
+    total_staked = 0.0
+    total_profit = 0.0
     per_market = []
 
     for mid, alert in first_alerts.items():

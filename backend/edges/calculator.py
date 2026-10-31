@@ -17,7 +17,9 @@ models exist.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+import re as _re
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import structlog
 
@@ -62,7 +64,7 @@ async def _tournament_prob(team_id: str, field: str, db) -> float | None:
 
 
 async def _was_recently_alerted(token_id: str, db, cooldown_min: int) -> bool:
-    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=cooldown_min)).isoformat()
+    cutoff = (datetime.now(UTC) - timedelta(minutes=cooldown_min)).isoformat()
     r = (db.table("edges")
          .select("id")
          .eq("market_id", token_id)
@@ -77,9 +79,6 @@ async def _was_recently_alerted(token_id: str, db, cooldown_min: int) -> bool:
 # ---------------------------------------------------------------------
 # Vig / overround handling
 # ---------------------------------------------------------------------
-
-import re as _re
-
 
 def _group_of(label: str) -> str | None:
     """Parse the group letter from a market label like '... Group H Winner ...'."""
@@ -118,7 +117,8 @@ async def _compute_overrounds(db) -> dict[str, Any]:
     for mk in outright:
         pr = await _latest_price(mk["id"], db)
         if pr and pr.get("price") is not None:
-            total += float(pr["price"]); counted += 1
+            total += float(pr["price"])
+            counted += 1
     if counted >= max(2, len(outright) // 2) and total > 0:
         result["outright"] = total
 
@@ -263,7 +263,7 @@ async def recompute_all() -> dict[str, int]:
                 # Mark exactly the row we just inserted as alerted.
                 db.table("edges").update({
                     "alerted":    True,
-                    "alerted_at": datetime.now(timezone.utc).isoformat(),
+                    "alerted_at": datetime.now(UTC).isoformat(),
                 }).eq("id", edge_row_id).execute()
                 stats["alerted"] += 1
             elif not sent:
