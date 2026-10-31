@@ -35,8 +35,8 @@ def compute_team_rating(squad: list[dict]) -> tuple[float, float]:
         if p.get("status") not in ("available", "doubtful"):
             continue
         avail = p["starter_prob"] * p["fitness"]
-        wA = POSITION_WEIGHTS_ATTACK.get(p["position"], 0.0)
-        wD = POSITION_WEIGHTS_DEFENSE.get(p["position"], 0.0)
+        w_attack = POSITION_WEIGHTS_ATTACK.get(p["position"], 0.0)
+        w_defense = POSITION_WEIGHTS_DEFENSE.get(p["position"], 0.0)
 
         # Blend club + international form
         attack_contrib = (
@@ -45,8 +45,8 @@ def compute_team_rating(squad: list[dict]) -> tuple[float, float]:
         )
         defense_contrib = -(p.get("club_xga90") or 0.0)   # lower xGA = better
 
-        attack  += avail * wA * attack_contrib
-        defense += avail * wD * defense_contrib
+        attack  += avail * w_attack * attack_contrib
+        defense += avail * w_defense * defense_contrib
 
     return attack, defense
 

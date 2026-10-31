@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import numpy as np
@@ -492,7 +492,7 @@ async def fit() -> dict[str, Any]:
     fifa_pts = _load_team_fifa_points()
     log.info("dixon_coles.fit.priors_loaded",
              n_with_prior=len(prior_net), n_with_points=len(fifa_pts))
-    fitted = _fit_core(matches, datetime.now(timezone.utc), prior_net, fifa_pts)
+    fitted = _fit_core(matches, datetime.now(UTC), prior_net, fifa_pts)
 
     # Persist ratings back to Supabase
     db = get_client()

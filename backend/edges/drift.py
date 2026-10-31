@@ -76,7 +76,9 @@ async def compute_drift_summary() -> dict[str, Any]:
     label_by_id = {m["id"]: m for m in mkts}
 
     per_market = []
-    n_toward = 0; n_away = 0; n_flat = 0
+    n_toward = 0
+    n_away = 0
+    n_flat = 0
     total_drift_signed = 0.0  # positive = market moved toward us on average
 
     for mid, alert in first_alerts.items():
