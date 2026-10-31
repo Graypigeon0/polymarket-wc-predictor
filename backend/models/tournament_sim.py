@@ -98,7 +98,7 @@ def _load_groups_and_ratings() -> tuple[dict[str, list[str]], dict[str, dict]]:
                   .select("id,fifa_code,name,base_attack,base_defense")
                   .execute()).data or []
     # WC 2026 co-hosts get a home-advantage boost in all their matches.
-    HOST_CODES = {"USA", "MEX", "CAN"}
+    host_codes = {"USA", "MEX", "CAN"}
 
     for t in teams_data:
         if t["id"] in all_teams and t.get("base_attack") is not None:
@@ -108,7 +108,7 @@ def _load_groups_and_ratings() -> tuple[dict[str, list[str]], dict[str, dict]]:
                 "name":      t["name"],
                 "fifa_code": t["fifa_code"],
                 "home_adv":  t.get("home_adv") or 0.0,
-                "is_host":   t["fifa_code"] in HOST_CODES,
+                "is_host":   t["fifa_code"] in host_codes,
             }
 
     return groups, ratings
@@ -175,15 +175,21 @@ def _simulate_group(team_ids: list[str], ratings: dict, rng, np_rng) -> list[str
             lh = float(np.exp(r1["attack"] + r2["defense"] + adv1))
             la = float(np.exp(r2["attack"] + r1["defense"] + adv2))
             g1, g2 = _sample_from_lambdas(lh, la, np_rng)
-            gf[t1] += g1; ga[t1] += g2
-            gf[t2] += g2; ga[t2] += g1
+            gf[t1] += g1
+            ga[t1] += g2
+            gf[t2] += g2
+            ga[t2] += g1
             if g1 > g2:
-                pts[t1] += 3; h2h[(t1, t2)] += 3
+                pts[t1] += 3
+                h2h[(t1, t2)] += 3
             elif g2 > g1:
-                pts[t2] += 3; h2h[(t2, t1)] += 3
+                pts[t2] += 3
+                h2h[(t2, t1)] += 3
             else:
-                pts[t1] += 1; pts[t2] += 1
-                h2h[(t1, t2)] += 1; h2h[(t2, t1)] += 1
+                pts[t1] += 1
+                pts[t2] += 1
+                h2h[(t1, t2)] += 1
+                h2h[(t2, t1)] += 1
 
     def sort_key(t):
         return (pts[t], gf[t] - ga[t], gf[t], rng.random())
@@ -331,7 +337,7 @@ async def simulate() -> dict[str, Any]:
     rng = random.Random(42)
     np_rng = np.random.default_rng(42)
 
-    for run in range(n_runs):
+    for _run in range(n_runs):
         group_results = {}
         for g, team_ids in valid_groups.items():
             standings = _simulate_group(team_ids, ratings, rng, np_rng)

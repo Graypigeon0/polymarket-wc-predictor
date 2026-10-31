@@ -22,7 +22,7 @@ genuine edges. If not, they are noise.
 from __future__ import annotations
 
 import math
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import numpy as np
@@ -70,7 +70,7 @@ async def run_backtest(target: str = "EURO2024") -> dict[str, Any]:
                 "known": list(TOURNAMENT_STARTS)}
 
     as_of = TOURNAMENT_STARTS[target]
-    as_of_dt = datetime.fromisoformat(as_of).replace(tzinfo=timezone.utc)
+    as_of_dt = datetime.fromisoformat(as_of).replace(tzinfo=UTC)
     log.info("backtest.start", target=target, as_of=as_of)
 
     # 1. Load training matches strictly before the tournament, excluding the

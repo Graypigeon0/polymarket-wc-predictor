@@ -146,7 +146,6 @@ async def discover_wc_markets() -> dict[str, int]:
                 if m.get("closed") or m.get("archived"):
                     continue
                 token_ids = _parse_json_field(m.get("clobTokenIds"))
-                outcomes = _parse_json_field(m.get("outcomes")) or ["Yes", "No"]
                 if not token_ids:
                     continue
 
@@ -223,7 +222,7 @@ def _classify_event(title: str, slug: str) -> str:
     text = f"{title} {slug}".lower()
     if "top scorer" in text or "golden boot" in text:
         return "top_scorer"
-    if "win group" in text or "group" in text and "winner" in text:
+    if "win group" in text or ("group" in text and "winner" in text):
         return "group_winner"
     if any(k in text for k in ["winner", "win the", "to win", "champion"]):
         return "outright"

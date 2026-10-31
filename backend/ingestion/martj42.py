@@ -27,7 +27,7 @@ from __future__ import annotations
 import csv
 import io
 import uuid
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 
 import httpx
 import structlog
@@ -161,7 +161,7 @@ async def refresh(lookback_years: int = LOOKBACK_YEARS) -> int:
 
     # Batch upserts in chunks of 500 to cut HTTP round-trips
     batch: list[dict] = []
-    BATCH_SIZE = 500
+    batch_size = 500
 
     async def _flush() -> None:
         nonlocal batch
@@ -217,7 +217,7 @@ async def refresh(lookback_years: int = LOOKBACK_YEARS) -> int:
                 "completed":   True,
             })
 
-            if len(batch) >= BATCH_SIZE:
+            if len(batch) >= batch_size:
                 await _flush()
 
             written += 1

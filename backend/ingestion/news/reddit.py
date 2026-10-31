@@ -8,7 +8,7 @@ No auth needed for read-only public subs. Polite rate limit + custom UA required
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import httpx
 import structlog
@@ -50,7 +50,7 @@ async def fetch_all(limit: int = 25) -> list[NewsItem]:
                         headline=d.get("title", ""),
                         body=d.get("selftext", "") or d.get("url", ""),
                         published=datetime.fromtimestamp(
-                            d.get("created_utc", 0), tz=timezone.utc
+                            d.get("created_utc", 0), tz=UTC
                         ),
                     ))
             except Exception as e:
