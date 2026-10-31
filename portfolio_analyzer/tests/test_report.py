@@ -253,3 +253,32 @@ def test_report_shows_annualised_volatility_line():
     short = _analysis("SHORT")
     short.data = TickerData("SHORT", "equity", short.data.prices.iloc[:20], {})
     assert "Annualised volatility: n/a" in _render({"SHORT": short})
+
+
+def _oil_data(n=60, seed=3):
+    rng = np.random.default_rng(seed)
+    close = pd.Series(50 * np.cumprod(1 + rng.normal(0, 0.02, n)),
+                      index=pd.bdate_range("2020-03-02", periods=n))
+    close.iloc[20] = -10.0
+    close.iloc[21] = 8.0
+    df = pd.DataFrame({"Open": close, "High": close, "Low": close, "Close": close, "Volume": 1.0})
+    return TickerData("CL=F", "commodity", df, {})
+
+
+def test_volatility_excludes_non_positive_price_returns():
+    td = _oil_data()
+    close = td.prices["Close"]
+    rets = close.pct_change(fill_method=None)
+    bad = (close <= 0) | (close.shift(1) <= 0)
+    expect = float(rets[~bad].dropna().std() * np.sqrt(252) * 100)
+    assert abs(annualised_volatility(td) - expect) < 1e-9
+    a = _analysis("CL=F", "commodity")
+    a.data = td
+    md = _render({"CL=F": a})
+    note = "(excludes 2 returns across non-positive prices)"
+    assert f"Annualised volatility: {expect:.1f}% {note}" in md
+
+
+def test_ordinary_volatility_has_no_exclusion_note():
+    md = _render({"AAA": _analysis("AAA")})
+    assert "excludes" not in md.split("Annualised volatility")[1].split("\n")[0]

@@ -371,3 +371,25 @@ def test_universe_none_skips_screen_entirely(monkeypatch, tmp_path, spec):
     assert res.exit_code == 0, res.output
     assert "Underpriced screen skipped (--universe none)" in out.read_text()
     assert sorted(fetched) == ["AAA", "SPY"]  # holdings + benchmark only
+
+
+def test_cli_negative_price_series_renders_cleaned_vol_and_hedge_note(
+    monkeypatch, tmp_path, universe_file
+):
+    base = _fake_fetch()
+
+    def fake(ticker, **kw):
+        td = base(ticker, **kw)
+        if ticker == "CL=F":
+            td.prices.iloc[200, td.prices.columns.get_loc("Close")] = -30.0
+        return td
+
+    monkeypatch.setattr(cli, "fetch", fake)
+    out = tmp_path / "report.md"
+    res = runner.invoke(
+        cli.app, ["CL=F:50", "AAA:50", "--universe", universe_file, "--report", str(out)]
+    )
+    assert res.exit_code == 0, res.output
+    md = out.read_text()
+    assert "(excludes 2 returns across non-positive prices)" in md
+    assert "Excluded 2 daily returns involving non-positive prices (CL=F)." in md

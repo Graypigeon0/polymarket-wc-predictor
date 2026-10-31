@@ -331,3 +331,88 @@ def test_mutually_anticorrelated_holdings_both_offsets():
     b = _td("B", _from_rets(-r))
     res = analyse_hedge([Holding("A", 0.5), Holding("B", 0.5)], {"A": a, "B": b}, bench)
     assert set(res.offsets) == {"A", "B"}
+
+
+# --- non-positive prices (CL=F-like) ---------------------------------------------------
+
+
+def _oil_and_bench(n=300, seed=11):
+    r = _rets(n=n, seed=seed)
+    bench = _td("SPY", _from_rets(r), "etf")
+    oil_r = r * 0.4 + np.random.default_rng(seed + 1).normal(0, 0.01, n)
+    oil = _from_rets(oil_r)
+    oil.iloc[150] = -37.0  # one negative close -> two excluded returns
+    return r, bench, oil
+
+
+def _clean_beta(oil, bench_close):
+    prices = pd.concat([oil, bench_close], axis=1, keys=["o", "b"]).dropna()
+    rets = prices.pct_change(fill_method=None)
+    bad = (prices <= 0) | (prices.shift(1) <= 0)
+    rets = rets.mask(bad).dropna()
+    return rets["o"].cov(rets["b"]) / rets["b"].var(), len(rets)
+
+
+def test_non_positive_price_returns_excluded_from_beta_and_noted():
+    _, bench, oil = _oil_and_bench()
+    res = analyse_hedge([Holding("CL=F", 1.0)], {"CL=F": _td("CL=F", oil)}, bench)
+    expect, n = _clean_beta(oil, bench.prices["Close"])
+    assert abs(res.beta - expect) < 1e-5
+    distorted = oil.pct_change(fill_method=None)
+    assert abs(distorted.iloc[150]) > 1  # sanity: raw series is distorted
+    assert "Excluded 2 daily returns involving non-positive prices (CL=F)." in res.reason
+    assert f"Based on {n} daily observations" in res.reason
+
+
+def test_other_holdings_not_corrupted_and_only_affected_tickers_named():
+    r, bench, oil = _oil_and_bench()
+    good = _td("GOOD", _from_rets(r * 0.8), "etf")
+    res = analyse_hedge(
+        [Holding("CL=F", 0.5), Holding("GOOD", 0.5)],
+        {"CL=F": _td("CL=F", oil), "GOOD": good},
+        bench,
+    )
+    assert "(CL=F)" in res.reason and "GOOD)" not in res.reason
+    assert "Excluded 2 daily" in res.reason
+    assert np.isfinite(res.beta)
+    assert res.correlation.notna().all().all()
+
+
+def test_ordinary_portfolio_reason_has_no_exclusion_clause():
+    r = _rets()
+    bench = _td("SPY", _from_rets(r), "etf")
+    h = _td("H", _from_rets(r * 0.5), "etf")
+    res = analyse_hedge([Holding("H", 1.0)], {"H": h}, bench)
+    assert "Excluded" not in res.reason and "non-positive" not in res.reason
+
+
+def test_verdict_based_on_cleaned_beta():
+    # raw oil beta (huge spike) is > 0.7 but cleaned beta is low and both windows are beaten
+    n = 1000
+    r = _rets(n=n)
+    for lo, hi in (("2020-02-19", "2020-03-23"), ("2022-01-03", "2022-10-12")):
+        r.loc[lo:hi] -= 0.01
+    bench = _td("SPY", _from_rets(r), "etf")
+    oil = _from_rets(r * 0.3)
+    both_down = (r < -0.012) & (r.shift(-1) < -0.012)
+    i = r.index.get_loc(r[both_down & (r.index > "2021-01-01")].index[0])
+    oil.iloc[i] = -oil.iloc[i - 1] * 0.5
+    oil.iloc[i + 1] = oil.iloc[i - 1]
+    res = analyse_hedge([Holding("CL=F", 1.0)], {"CL=F": _td("CL=F", oil)}, bench)
+    raw = oil.pct_change(fill_method=None)
+    br = bench.prices["Close"].pct_change()
+    assert raw.cov(br) / br.var() > 0.7  # the raw, distorted beta would block "effective"
+    assert res.beta <= 0.7
+    assert res.verdict == "effective"
+
+
+def test_stress_window_with_excluded_return_is_noted():
+    n = 1000
+    r = _rets(n=n)
+    bench = _td("SPY", _from_rets(r), "etf")
+    oil = _from_rets(r * 0.5)
+    i = oil.index.get_loc(pd.Timestamp("2020-03-10"))
+    oil.iloc[i] = -5.0
+    res = analyse_hedge([Holding("CL=F", 1.0)], {"CL=F": _td("CL=F", oil)}, bench)
+    assert "covid_2020" in res.reason and "excluded" in res.reason.lower()
+    assert "bear_2022 window" not in res.reason

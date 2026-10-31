@@ -13,6 +13,7 @@ from portfolio_analyzer.models import (
     TickerData,
     ValuationCandidate,
 )
+from portfolio_analyzer.returns import positive_price_returns
 from portfolio_analyzer.valuation import MIN_SECTOR_PEERS, ScreenStats
 
 DISCLAIMER = "Not financial advice. Signals are heuristics, not predictions."
@@ -48,20 +49,23 @@ def last_close(data: TickerData) -> float | None:
     return value if math.isfinite(value) else None
 
 
-def annualised_volatility(data: TickerData) -> float | None:
-    """Std of daily Close returns x sqrt(365 crypto / 252 others), in percent.
-
+def volatility_stats(data: TickerData) -> tuple[float | None, int]:
+    """(annualised volatility in percent or None, count of returns excluded for
+    non-positive prices). Std of daily Close returns x sqrt(365 crypto / 252 others);
     None when there are fewer than MIN_VOL_RETURNS usable returns.
     """
     prices = data.prices
     if prices is None or "Close" not in prices.columns:
-        return None
-    rets = prices["Close"].astype(float).pct_change(fill_method=None)
-    rets = rets.replace([math.inf, -math.inf], math.nan).dropna()
+        return None, 0
+    rets, excluded = positive_price_returns(prices["Close"])
     if len(rets) < MIN_VOL_RETURNS:
-        return None
+        return None, excluded
     vol = float(rets.std() * math.sqrt(annualisation_factor(data.asset_class)) * 100)
-    return vol if math.isfinite(vol) else None
+    return (vol if math.isfinite(vol) else None), excluded
+
+
+def annualised_volatility(data: TickerData) -> float | None:
+    return volatility_stats(data)[0]
 
 
 def pct_below(price: float | None, stop: float | None) -> str:
@@ -92,8 +96,10 @@ def _valuation_line(h: HoldingAnalysis) -> str:
 def _holding_section(holding: Holding, h: HoldingAnalysis) -> list[str]:
     price = last_close(h.data)
     price_txt = f"{price:.2f}" if price is not None else "n/a"
-    vol = annualised_volatility(h.data)
+    vol, n_excl = volatility_stats(h.data)
     vol_txt = f"{vol:.1f}%" if vol is not None else "n/a"
+    if vol is not None and n_excl:
+        vol_txt += f" (excludes {n_excl} returns across non-positive prices)"
     lines = [
         f"## {holding.ticker} ({h.data.asset_class}, {holding.weight:.1%} of portfolio)",
         "",

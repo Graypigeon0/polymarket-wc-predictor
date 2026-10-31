@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 from portfolio_analyzer.models import HedgeResult, Holding, StressResult, TickerData
+from portfolio_analyzer.returns import positive_price_returns
 
 HIGH_CORR = 0.85
 OFFSET_CORR = -0.2
@@ -32,6 +33,22 @@ def _close(td: TickerData) -> pd.Series:
     return close[~close.index.duplicated(keep="last")].sort_index()
 
 
+def _joined(
+    holdings: list[Holding], data: dict[str, TickerData], benchmark: TickerData
+) -> tuple[pd.DataFrame, dict[str, int], pd.DatetimeIndex]:
+    """Joined returns, per-ticker count of returns excluded for non-positive prices, and the
+    dates of the dropped rows that were excluded for that reason."""
+    cols = {h.ticker: _close(data[h.ticker]) for h in holdings if h.ticker in data}
+    cols[_BENCH] = _close(benchmark)
+    prices = pd.concat(cols, axis=1, join="inner").dropna()
+    raw, counts = positive_price_returns(prices)
+    excluded = {
+        (benchmark.ticker if k == _BENCH else k): int(v) for k, v in counts.items() if v
+    }
+    bad_dates = raw.index[((prices <= 0) | (prices.shift(1) <= 0)).any(axis=1)]
+    return raw.dropna(), excluded, bad_dates
+
+
 def joined_returns(
     holdings: list[Holding], data: dict[str, TickerData], benchmark: TickerData
 ) -> pd.DataFrame:
@@ -39,12 +56,9 @@ def joined_returns(
 
     Prices are inner-joined on common dates FIRST and returns computed afterwards, so a
     crypto holding's Friday->Monday return compounds its weekend moves instead of losing them.
+    Returns across a non-positive price are excluded (the whole joined row is dropped).
     """
-    cols = {h.ticker: _close(data[h.ticker]) for h in holdings if h.ticker in data}
-    cols[_BENCH] = _close(benchmark)
-    prices = pd.concat(cols, axis=1, join="inner").dropna()
-    rets = prices.pct_change(fill_method=None)
-    return rets.replace([np.inf, -np.inf], np.nan).dropna()
+    return _joined(holdings, data, benchmark)[0]
 
 
 def _beta(series: pd.Series, bench: pd.Series) -> float:
@@ -110,6 +124,24 @@ def _offsets(rets: pd.DataFrame, weights: pd.Series, bench: pd.Series) -> list[s
     return out
 
 
+def _exclusion_clause(excluded: dict[str, int], bad_dates: pd.DatetimeIndex) -> str:
+    if not excluded:
+        return ""
+    total = sum(excluded.values())
+    clause = (
+        f" Excluded {total} daily returns involving non-positive prices "
+        f"({', '.join(excluded)})."
+    )
+    hit = [
+        name
+        for name, (start, end) in STRESS_WINDOWS.items()
+        if ((bad_dates > pd.Timestamp(start)) & (bad_dates <= pd.Timestamp(end))).any()
+    ]
+    if hit:
+        clause += f" Stress window(s) {', '.join(hit)} contain excluded returns."
+    return clause
+
+
 def _safe(tickers: list[str], reason: str, conc: dict[str, float]) -> HedgeResult:
     corr = pd.DataFrame(np.nan, index=tickers, columns=tickers, dtype=float)
     return HedgeResult(0.0, corr, [], conc, [], [], "none", reason)
@@ -132,7 +164,7 @@ def analyse_hedge(
     def with_note(text: str) -> str:
         return f"{text}; {note}." if note else f"{text}."
 
-    rets = joined_returns(held, data, benchmark)
+    rets, excluded, bad_dates = _joined(held, data, benchmark)
     starts = {t: data[t].prices.index.min() for t in tickers}
     starts[_BENCH] = benchmark.prices.index.min()
     starts = {("benchmark" if k == _BENCH else k): v for k, v in starts.items()}
@@ -192,6 +224,7 @@ def analyse_hedge(
         f". Based on {len(rets)} daily observations, "
         f"{rets.index.min().date()} to {rets.index.max().date()}."
     )
+    text += _exclusion_clause(excluded, bad_dates)
     return HedgeResult(
         beta, corr, pairs, conc, _offsets(rets, weights, bench), stress, verdict, text
     )
