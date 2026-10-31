@@ -130,6 +130,42 @@ docs/                 # build plan + deploy notes
 
 🚧 **Scaffold stage.** All modules are stubbed with clear `TODO` markers. See `docs/BUILD_PLAN.md` for the 3-week timeline.
 
+## Portfolio analyzer
+
+Decision support for a portfolio of stocks, ETFs, commodities and crypto: per-holding bullish/bearish
+outlook, candlestick reading and stop-loss suggestions, a portfolio hedge verdict, and a screen for
+underpriced equities. All numbers come from deterministic code.
+
+```bash
+python -m portfolio_analyzer AAPL:40 MSFT:30 XOM:15 CL=F:5 BTC-USD:10 \
+    --benchmark SPY --report report.md
+```
+
+`TICKER:WEIGHT` weights are percents (omit all for equal weights). Any Yahoo Finance symbol works,
+e.g. `CL=F` (crude oil), `GC=F` (gold), `BTC-USD` (bitcoin).
+
+| Component | Equity | ETF | Commodity | Crypto |
+|---|---|---|---|---|
+| Candlesticks, stop loss, hedge analysis | yes | yes | yes | yes |
+| Valuation / underpriced screen | yes | no | no | no |
+
+Non-equities show `valuation n/a (no earnings/cash flow)`. Each holding section shows annualised volatility (std of daily returns x sqrt of 365 trading
+days for crypto, 252 for the rest; `n/a` with fewer than 30 returns).
+
+- `--narrate`: Claude writes a short paragraph per holding from the computed figures only. Needs
+  `pip install '.[narrate]'` and `ANTHROPIC_API_KEY`.
+- `--universe sp500|FILE|none`: the underpriced-stock universe (default S&P 500 from Wikipedia, or a
+  file with one ticker per line). The default `sp500` run fetches about 500 tickers and takes
+  minutes; `--universe none` (case-insensitive) skips the underpriced screen entirely. A sector needs
+  at least 3 qualifying stocks to be ranked, and the report states how many universe stocks were
+  skipped for missing fundamentals.
+- Market data is cached per ticker and day as CSV/JSON in `~/.cache/portfolio_analyzer` (mode 0700).
+  Today's unfinished bar is dropped so signals use completed daily candles.
+- `python -m pytest` runs offline (network tests are deselected); `python -m pytest -m network`
+  runs the live-data smoke test.
+
+Not financial advice. Signals are heuristics, not predictions.
+
 ## License
 
 MIT — see `LICENSE`.

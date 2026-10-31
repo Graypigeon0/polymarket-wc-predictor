@@ -49,3 +49,6 @@ logs/
 
 # Docker
 docker-compose.override.yml
+
+# Portfolio analyzer cache now lives in ~/.cache/portfolio_analyzer; this ignores legacy local dirs
+.cache/
